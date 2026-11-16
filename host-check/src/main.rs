@@ -30,24 +30,32 @@ fn main() {
     let wasm = std::fs::read(dir.join("gears.wasm")).expect("component");
     let cases = [
         ("spur", "defaults", json!({})),
-        ("spur", "150 teeth, bore", json!({"teeth": 150, "module": 1, "bore": 20, "flank_points": 12})),
         ("spur", "bad: 3 teeth", json!({"teeth": 3})),
-        ("helical", "defaults", json!({})),
         ("helical", "LH 30deg on YZ, bore", json!({"helix_angle": 30, "hand": "left", "plane": "YZ", "bore": 10, "thickness": 20})),
-        ("helical", "bad: helix 60", json!({"helix_angle": 60})),
+        ("herringbone", "defaults, bore 8", json!({"bore": 8})),
+        ("bevel", "20:40, bore 8", json!({"teeth": 20, "mate_teeth": 40, "bore": 8})),
+        ("bevel", "bad: face too wide", json!({"face_width": 500})),
+        ("worm", "1 start, defaults", json!({})),
+        ("worm", "2 starts, 30 turns", json!({"starts": 2, "length": 377})),
+        ("worm-wheel", "30 teeth for 1-start worm", json!({"teeth": 30})),
     ];
     for (entry, label, params) in cases {
         let label = format!("{entry} {label}");
         let (host, result) = craft_plugin_wasm::run(Recorder::default(), &manifest, &wasm, entry, &params);
-        let summary: Vec<String> = host.calls.iter().map(|(c, a)| match a.get("points") {
+        let mut summary: Vec<String> = host.calls.iter().map(|(c, a)| match a.get("points") {
             Some(p) => format!("{c}({} pts)", p.as_array().map_or(0, |v| v.len())),
-            None if c == "solid.sweep" => format!("{c}(twist {})", a["twist"]),
+            None if c == "solid.sweep" => format!("{c}({} {})", a["operation"], a.get("twist").or(a.get("scale")).unwrap_or(&json!(""))),
             None => c.clone(),
         }).collect();
         println!("== {label}: committed={} rolled_back={}", host.committed, host.rolled_back);
-        println!("   calls: {}", summary.join(" -> "));
+        summary.dedup();
+        println!("   calls ({}): {}", host.calls.len(), summary.join(" -> "));
         match result {
-            Ok(v) => println!("   result: {}", serde_json::to_string(&v).unwrap()),
+            Ok(v) => {
+                let keep = ["body", "pitch_diameter_mm", "twist_deg", "twist_each_half_deg", "pitch_angle_deg", "apex_distance_mm", "lead_mm", "sections", "centre_distance_mm", "helix_angle_deg"];
+                let short: serde_json::Map<String, Value> = v.as_object().unwrap().iter().filter(|(k, _)| keep.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect();
+                println!("   result: {}", Value::Object(short));
+            }
             Err(e) => println!("   error: {e:?}"),
         }
     }

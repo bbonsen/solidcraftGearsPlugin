@@ -98,67 +98,269 @@ impl SpurGear {
     pub fn profile(&self) -> Result<Vec<[f64; 2]>, (&'static str, String)> {
         self.validate()?;
         let c = self.circles();
-        let z = f64::from(self.teeth);
-        let alpha = self.transverse_pressure_angle();
         let backlash = self.backlash / self.cos_helix();
-
-        // Half the tooth's angular thickness measured at the base circle.
         let half_pitch = (PI * self.transverse_module() / 2.0 - backlash) / (2.0 * c.pitch);
-        let psi_base = half_pitch + inv(alpha);
-        // Half angle of the tooth at radius r (r >= base).
-        let psi = |r: f64| psi_base - inv((c.base / r).clamp(-1.0, 1.0).acos());
+        let flank = involute_flank(&c, self.transverse_pressure_angle(), half_pitch, self.flank_points as usize)?;
+        assemble(self.teeth, &flank, 0.0)
+    }
+}
 
-        let psi_tip = psi(c.tip);
-        if psi_tip <= 0.0 {
-            return Err(("teeth", "teeth come to a point at the tip circle; use more teeth or a smaller pressure angle".into()));
+/// One side of a tooth from the root circle to the tip circle, as (radius, half angle):
+/// the tooth spans `centre ± half angle` at that radius.
+pub type Flank = Vec<(f64, f64)>;
+
+/// An involute flank for `circles`, with transverse pressure angle `alpha` (radians) and half
+/// the tooth's angular thickness at the pitch circle `half_pitch`. Below the base circle the
+/// flank runs radially to the root.
+pub fn involute_flank(c: &Circles, alpha: f64, half_pitch: f64, n: usize) -> Result<Flank, (&'static str, String)> {
+    let psi_base = half_pitch + inv(alpha);
+    let psi = |r: f64| psi_base - inv((c.base / r).clamp(-1.0, 1.0).acos());
+    if psi(c.tip) <= 0.0 {
+        return Err(("teeth", "teeth come to a point at the tip circle; use more teeth or a smaller pressure angle".into()));
+    }
+    let mut flank = Vec::with_capacity(n + 1);
+    if c.root < c.base {
+        flank.push((c.root, psi_base));
+    }
+    let start = c.root.max(c.base);
+    for i in 0..n {
+        let t = i as f64 / (n - 1) as f64;
+        // Cluster points near the base where curvature is highest.
+        let r = start + (c.tip - start) * t * t;
+        flank.push((r, psi(r)));
+    }
+    Ok(flank)
+}
+
+/// Points on an arc land strictly between angles `a0` and `a1` at radius `r`: at least two, and
+/// one per 4 degrees, so long lands (worm threads) stay round.
+fn land(out: &mut Vec<[f64; 2]>, r: f64, a0: f64, a1: f64) {
+    let n = (((a1 - a0).abs() / 4f64.to_radians()).ceil() as usize).clamp(2, 180);
+    for j in 1..=n {
+        let a = a0 + (a1 - a0) * j as f64 / (n + 1) as f64;
+        out.push([r * a.cos(), r * a.sin()]);
+    }
+}
+
+/// `teeth` copies of a symmetric tooth with `flank` (root to tip), the first centred at angle
+/// `rotation`, joined by tip and root lands. Counter-clockwise; last point not repeated.
+pub fn assemble(teeth: u32, flank: &[(f64, f64)], rotation: f64) -> Result<Vec<[f64; 2]>, (&'static str, String)> {
+    let (Some(&(r_root, psi_root)), Some(&(r_tip, psi_tip))) = (flank.first(), flank.last()) else {
+        return Err(("flank_points", "a flank needs points".into()));
+    };
+    let step = 2.0 * PI / f64::from(teeth);
+    if psi_tip <= 0.0 {
+        return Err(("teeth", "teeth come to a point at the tip circle".into()));
+    }
+    if 2.0 * psi_root >= step {
+        return Err(("teeth", "no gap is left between teeth at the root circle".into()));
+    }
+    let pt = |r: f64, a: f64| [r * a.cos(), r * a.sin()];
+    let mut out = Vec::new();
+    for k in 0..teeth {
+        let th = rotation + step * f64::from(k);
+        out.extend(flank.iter().map(|&(r, p)| pt(r, th - p)));
+        land(&mut out, r_tip, th - psi_tip, th + psi_tip);
+        out.extend(flank.iter().rev().map(|&(r, p)| pt(r, th + p)));
+        land(&mut out, r_root, th + psi_root, th + step - psi_root);
+    }
+    Ok(out)
+}
+
+/// A straight bevel gear for shafts at 90 degrees, given at its large (heel) end. The teeth are
+/// Tredgold's approximation: the heel profile is that of a spur gear with z / cos(pitch angle)
+/// teeth on the back cone, laid into the plane square to the axis; from there every point runs
+/// straight towards the cone apex.
+#[derive(Clone, Debug)]
+pub struct BevelGear {
+    pub teeth: u32,
+    pub mate_teeth: u32,
+    /// Module at the heel.
+    pub module: f64,
+    pub pressure_angle: f64,
+    pub backlash: f64,
+    pub flank_points: u32,
+    /// Face width along the pitch cone, mm; 0 picks a third of the cone distance.
+    pub face_width: f64,
+}
+
+impl BevelGear {
+    fn spur(&self, teeth: u32) -> SpurGear {
+        SpurGear {
+            teeth,
+            module: self.module,
+            pressure_angle: self.pressure_angle,
+            helix_angle: 0.0,
+            backlash: self.backlash,
+            flank_points: self.flank_points,
         }
+    }
 
-        // Flank radii from the root (or base, whichever is larger) up to the tip.
-        let start = c.root.max(c.base);
-        let n = self.flank_points as usize;
-        let flank: Vec<(f64, f64)> = (0..n)
+    pub fn validate(&self) -> Result<(), (&'static str, String)> {
+        self.spur(self.teeth).validate()?;
+        if !(MIN_TEETH..=MAX_TEETH).contains(&self.mate_teeth) {
+            return Err(("mate_teeth", format!("must be {MIN_TEETH}..={MAX_TEETH}")));
+        }
+        if !(self.face_width.is_finite() && self.face_width >= 0.0 && self.face_width <= self.cone_distance() / 2.0) {
+            return Err(("face_width", format!("must be 0 (automatic) up to {:.3} mm, half the cone distance", self.cone_distance() / 2.0)));
+        }
+        Ok(())
+    }
+
+    /// Pitch cone angle δ, radians.
+    pub fn pitch_angle(&self) -> f64 {
+        f64::from(self.teeth).atan2(f64::from(self.mate_teeth))
+    }
+
+    pub fn pitch_radius(&self) -> f64 {
+        self.module * f64::from(self.teeth) / 2.0
+    }
+
+    /// Distance from the heel's pitch circle to the apex along the pitch cone.
+    pub fn cone_distance(&self) -> f64 {
+        self.pitch_radius() / self.pitch_angle().sin()
+    }
+
+    /// Face width actually used.
+    pub fn face(&self) -> f64 {
+        if self.face_width > 0.0 {
+            self.face_width
+        } else {
+            self.cone_distance() / 3.0
+        }
+    }
+
+    /// Length of the teeth along the gear axis.
+    pub fn axial_length(&self) -> f64 {
+        self.face() * self.pitch_angle().cos()
+    }
+
+    /// Size of the toe (small end) relative to the heel.
+    pub fn toe_scale(&self) -> f64 {
+        1.0 - self.face() / self.cone_distance()
+    }
+
+    /// Axial distance from the heel plane to the cone apex.
+    pub fn apex_distance(&self) -> f64 {
+        self.pitch_radius() / self.pitch_angle().tan()
+    }
+
+    /// Heel profile in the plane square to the axis, tooth 0 on +X.
+    pub fn profile(&self) -> Result<Vec<[f64; 2]>, (&'static str, String)> {
+        self.validate()?;
+        let delta = self.pitch_angle();
+        let r = self.pitch_radius();
+        let rv = r / delta.cos();
+        let m = self.module;
+        let virt = Circles { pitch: rv, base: rv * self.pressure_angle.to_radians().cos(), tip: rv + m, root: rv - 1.25 * m };
+        let half_pitch = (PI * m / 2.0 - self.backlash) / (2.0 * rv);
+        let vflank = involute_flank(&virt, self.pressure_angle.to_radians(), half_pitch, self.flank_points as usize)?;
+        // Back cone → axis-square plane: depth from the pitch circle shrinks by cos δ, the arc
+        // along the circle is kept.
+        let flank: Flank = vflank
+            .iter()
+            .map(|&(rho, psi)| {
+                let rr = r + (rho - rv) * delta.cos();
+                (rr, rho * psi / rr)
+            })
+            .collect();
+        assemble(self.teeth, &flank, 0.0)
+    }
+}
+
+/// A cylindrical worm with a straight-sided axial profile (ZA / Archimedean). Its section square
+/// to the axis is a gear outline with one tooth per start, so a twisted sweep of that section
+/// (one turn per lead) is the exact thread.
+#[derive(Clone, Debug)]
+pub struct Worm {
+    pub starts: u32,
+    /// Axial module.
+    pub module: f64,
+    /// Diameter factor q: pitch diameter = q × module.
+    pub diameter_factor: f64,
+    /// Axial pressure angle in degrees.
+    pub pressure_angle: f64,
+    pub backlash: f64,
+    pub flank_points: u32,
+}
+
+impl Worm {
+    pub fn validate(&self) -> Result<(), (&'static str, String)> {
+        if !(1..=6).contains(&self.starts) {
+            return Err(("starts", "must be 1..=6".into()));
+        }
+        if !(self.module.is_finite() && self.module >= 0.1 && self.module <= 50.0) {
+            return Err(("module", "must be 0.1..=50 mm".into()));
+        }
+        if !(self.diameter_factor.is_finite() && (5.0..=30.0).contains(&self.diameter_factor)) {
+            return Err(("diameter_factor", "must be 5..=30".into()));
+        }
+        if !(self.pressure_angle.is_finite() && (10.0..=30.0).contains(&self.pressure_angle)) {
+            return Err(("pressure_angle", "must be 10..=30 degrees".into()));
+        }
+        if !(self.backlash.is_finite() && self.backlash >= 0.0 && self.backlash < self.module / 2.0) {
+            return Err(("backlash", "must be at least 0 and smaller than half the module".into()));
+        }
+        if !(2..=40).contains(&self.flank_points) {
+            return Err(("flank_points", "must be 2..=40".into()));
+        }
+        Ok(())
+    }
+
+    pub fn circles(&self) -> Circles {
+        let pitch = self.diameter_factor * self.module / 2.0;
+        // No base circle: the axial flanks are straight. Report the pitch radius in its place.
+        Circles { pitch, base: pitch, tip: pitch + self.module, root: pitch - 1.25 * self.module }
+    }
+
+    /// Axial distance the thread advances per turn.
+    pub fn lead(&self) -> f64 {
+        f64::from(self.starts) * PI * self.module
+    }
+
+    /// Lead angle γ at the pitch diameter, radians.
+    pub fn lead_angle(&self) -> f64 {
+        (f64::from(self.starts) / self.diameter_factor).atan()
+    }
+
+    /// Section square to the axis at the profile plane, thread 0 centred on +X, turned by
+    /// `rotation` radians.
+    pub fn section(&self, rotation: f64) -> Result<Vec<[f64; 2]>, (&'static str, String)> {
+        self.validate()?;
+        let c = self.circles();
+        let tan_a = self.pressure_angle.to_radians().tan();
+        // Axial tooth thickness at radius r; its angular half-width is π·t / lead.
+        let t = |r: f64| PI * self.module / 2.0 - self.backlash - 2.0 * (r - c.pitch) * tan_a;
+        if t(c.tip) <= 0.0 || PI * self.module - t(c.root) <= 0.0 {
+            return Err(("pressure_angle", "the thread comes to a point; use a smaller pressure angle".into()));
+        }
+        let lead = self.lead();
+        let psi = |r: f64| PI * t(r) / lead;
+        // The flank is a spiral; keep a point every 3 degrees of it.
+        let sweep = (psi(c.root) - psi(c.tip)).to_degrees();
+        let n = (self.flank_points as usize).max((sweep / 3.0).ceil() as usize + 1).min(120);
+        let flank: Flank = (0..n)
             .map(|i| {
-                let t = i as f64 / (n - 1) as f64;
-                // Cluster points near the base where curvature is highest.
-                let r = start + (c.tip - start) * t * t;
+                let r = c.root + (c.tip - c.root) * i as f64 / (n - 1) as f64;
                 (r, psi(r))
             })
             .collect();
-        let psi_root_flank = flank[0].1;
+        assemble(self.starts, &flank, rotation)
+    }
 
-        let pt = |r: f64, a: f64| [r * a.cos(), r * a.sin()];
-        let step = 2.0 * PI / z;
-        let mut out = Vec::with_capacity(self.teeth as usize * (2 * n + 6));
-        for k in 0..self.teeth {
-            let th = step * f64::from(k);
-            // Radial segment below the base circle, when the root lies inside it.
-            if c.root < c.base {
-                out.push(pt(c.root, th - psi_base));
-            }
-            for &(r, p) in &flank {
-                out.push(pt(r, th - p));
-            }
-            // Tip land.
-            for j in 1..3 {
-                let a = -psi_tip + 2.0 * psi_tip * f64::from(j) / 3.0;
-                out.push(pt(c.tip, th + a));
-            }
-            for &(r, p) in flank.iter().rev() {
-                out.push(pt(r, th + p));
-            }
-            let gap_start = if c.root < c.base {
-                out.push(pt(c.root, th + psi_base));
-                psi_base
-            } else {
-                psi_root_flank
-            };
-            // Root land between this tooth and the next.
-            let gap = step - 2.0 * gap_start;
-            for j in 1..3 {
-                out.push(pt(c.root, th + gap_start + gap * f64::from(j) / 3.0));
-            }
+    /// The matching wheel, as the helical gear that meshes with this worm on crossed axes:
+    /// transverse module and pressure angle equal the worm's axial ones, helix angle equals the
+    /// worm's lead angle, same hand. Not throated.
+    pub fn wheel(&self, teeth: u32) -> SpurGear {
+        let g = self.lead_angle();
+        SpurGear {
+            teeth,
+            module: self.module * g.cos(),
+            pressure_angle: (self.pressure_angle.to_radians().tan() * g.cos()).atan().to_degrees(),
+            helix_angle: g.to_degrees(),
+            backlash: self.backlash * g.cos(),
+            flank_points: self.flank_points,
         }
-        Ok(out)
     }
 }
 
@@ -267,4 +469,103 @@ mod tests {
         assert_eq!(gear(20).twist(10.0), 0.0);
         assert!(SpurGear { helix_angle: 30.0, ..gear(10) }.min_teeth_without_undercut() < gear(10).min_teeth_without_undercut());
     }
+
+    fn bevel(z: u32, mate: u32) -> BevelGear {
+        BevelGear { teeth: z, mate_teeth: mate, module: 2.0, pressure_angle: 20.0, backlash: 0.0, flank_points: 8, face_width: 0.0 }
+    }
+
+    fn simple_ccw(pts: &[[f64; 2]], lo: f64, hi: f64) {
+        // Star-shaped about the origin: radii within [lo, hi], angle never runs backwards, and
+        // the angles add up to one full turn.
+        let mut turned = 0.0;
+        for (i, w) in pts.windows(2).enumerate() {
+            let (r, _) = polar(w[1]);
+            assert!(r >= lo - 1e-9 && r <= hi + 1e-9, "point {} r={r}", i + 1);
+            let (a0, a1) = (w[0][1].atan2(w[0][0]), w[1][1].atan2(w[1][0]));
+            let d = (a1 - a0 + PI).rem_euclid(2.0 * PI) - PI;
+            assert!(d >= -1e-12, "angle went backwards at {}", i + 1);
+            turned += d;
+        }
+        let (l, f) = (pts[pts.len() - 1], pts[0]);
+        turned += (f[1].atan2(f[0]) - l[1].atan2(l[0]) + PI).rem_euclid(2.0 * PI) - PI;
+        assert!((turned - 2.0 * PI).abs() < 1e-9, "turned {turned}");
+    }
+
+    #[test]
+    fn bevel_cone_matches_standard_formulas() {
+        let b = bevel(20, 40);
+        let d = 0.5f64.atan();
+        assert!((b.pitch_angle() - d).abs() < 1e-12);
+        assert!((b.cone_distance() - 20.0 / d.sin()).abs() < 1e-12);
+        assert!((b.face() - b.cone_distance() / 3.0).abs() < 1e-12);
+        assert!((b.toe_scale() - 2.0 / 3.0).abs() < 1e-12);
+        // Apex sits where the shrinking pitch circle reaches zero.
+        assert!((b.apex_distance() * (1.0 - b.toe_scale()) - b.axial_length()).abs() < 1e-9);
+        let pts = b.profile().unwrap();
+        // Heel outside radius r + m·cos δ, root r - 1.25 m·cos δ.
+        simple_ccw(&pts, 20.0 - 2.5 * d.cos(), 20.0 + 2.0 * d.cos());
+        let rmax = pts.iter().map(|&p| polar(p).0).fold(0.0, f64::max);
+        assert!((rmax - (20.0 + 2.0 * d.cos())).abs() < 1e-9);
+        // A miter gear (1:1) sits at 45 degrees.
+        assert!((bevel(25, 25).pitch_angle() - PI / 4.0).abs() < 1e-12);
+        simple_ccw(&bevel(25, 25).profile().unwrap(), 0.0, 100.0);
+        simple_ccw(&bevel(12, 60).profile().unwrap(), 0.0, 100.0);
+        simple_ccw(&bevel(60, 12).profile().unwrap(), 0.0, 100.0);
+    }
+
+    #[test]
+    fn bevel_refuses_too_wide_a_face() {
+        let b = BevelGear { face_width: 1000.0, ..bevel(20, 20) };
+        assert_eq!(b.profile().unwrap_err().0, "face_width");
+        assert_eq!(BevelGear { mate_teeth: 2, ..bevel(20, 20) }.profile().unwrap_err().0, "mate_teeth");
+    }
+
+    fn worm(starts: u32) -> Worm {
+        Worm { starts, module: 2.0, diameter_factor: 10.0, pressure_angle: 20.0, backlash: 0.0, flank_points: 8 }
+    }
+
+    #[test]
+    fn worm_section_is_the_thread_cut_square_to_the_axis() {
+        for starts in 1..=4 {
+            let w = worm(starts);
+            let c = w.circles();
+            let pts = w.section(0.0).unwrap();
+            simple_ccw(&pts, c.root, c.tip);
+            // At the pitch radius the thread fills exactly half of each start's turn.
+            let lead = w.lead();
+            assert!((lead - f64::from(starts) * PI * 2.0).abs() < 1e-12);
+            let psi_p = PI * (PI * 2.0 / 2.0) / lead;
+            assert!((2.0 * psi_p - PI / f64::from(starts)).abs() < 1e-12);
+        }
+        assert!((worm(1).lead_angle() - 0.1f64.atan()).abs() < 1e-12);
+        // Turning the section turns every point.
+        let (a, b) = (worm(2).section(0.0).unwrap(), worm(2).section(0.3).unwrap());
+        assert!((polar(b[0]).1 - polar(a[0]).1 - 0.3).rem_euclid(2.0 * PI) < 1e-9);
+    }
+
+    #[test]
+    fn worm_wheel_matches_the_worm_pitch() {
+        let w = worm(2);
+        let wheel = w.wheel(30);
+        // Transverse module and pressure angle of the wheel are the worm's axial ones.
+        assert!((wheel.transverse_module() - 2.0).abs() < 1e-12);
+        assert!((wheel.transverse_pressure_angle().to_degrees() - 20.0).abs() < 1e-9);
+        assert!((wheel.helix_angle - w.lead_angle().to_degrees()).abs() < 1e-12);
+        assert!(wheel.profile().is_ok());
+    }
+
+    #[test]
+    fn worm_refuses_hostile_input() {
+        for w in [
+            Worm { starts: 0, ..worm(1) },
+            Worm { starts: 99, ..worm(1) },
+            Worm { diameter_factor: 1.0, ..worm(1) },
+            Worm { module: f64::INFINITY, ..worm(1) },
+            Worm { pressure_angle: 45.0, ..worm(1) },
+            Worm { backlash: 5.0, ..worm(1) },
+        ] {
+            assert!(w.section(0.0).is_err(), "{w:?}");
+        }
+    }
 }
+

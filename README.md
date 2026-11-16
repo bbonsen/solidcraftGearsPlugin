@@ -1,13 +1,19 @@
 # Gears: a SolidCraft plugin
 
-Makes involute spur and helical gears in SolidCraft. It adds **Spur gear** and **Helical gear**
-entries to the Model ribbon. You fill in a form, and the plugin computes the tooth profile,
-then builds it with ordinary SolidCraft commands:
+Makes involute gears in SolidCraft. It adds six entries to the Model ribbon. You fill in a
+form, and the plugin computes the tooth profile, then builds it with ordinary SolidCraft
+commands:
 
-- **Spur:** a closed sketch polyline, plus an optional bore circle, extruded.
-- **Helical:** the same profile, swept along a straight line on the gear's axis with a twist.
+| Entry | Builds it as |
+|---|---|
+| `spur` | The profile (a closed sketch polyline, plus an optional bore circle), extruded |
+| `helical` | The profile, swept along a straight line on the gear's axis with a twist |
+| `herringbone` | Two helical halves swept outwards from mid-width with opposite twists, joined |
+| `bevel` | The heel profile, swept towards the cone apex while it shrinks; the bore is cut after |
+| `worm` | The worm's section square to its axis, swept with one turn per lead; long worms in joined sections |
+| `worm-wheel` | A helical gear that meshes with a `worm` |
 
-The result is a normal, editable sketch and extrude or sweep, so you can modify it later. The
+The result is ordinary editable sketches, extrudes and sweeps, so you can modify it later. The
 whole run is a single undo step. The plugin needs no file, network or settings access.
 
 ![Two meshing profiles](preview.png)
@@ -15,13 +21,13 @@ whole run is a single undo step. The plugin needs no file, network or settings a
 ## Install
 
 In SolidCraft (desktop), open **Preferences > Plugins > Install plugin…** and pick
-`gears-0.2.0.zip`. It asks for no permissions. You can also install it from a script:
+`gears-0.3.0.zip`. It asks for no permissions. You can also install it from a script:
 
 ```json
-[{"command":"plugin.install","params":{"path":"gears-0.2.0.zip"}}]
+[{"command":"plugin.install","params":{"path":"gears-0.3.0.zip"}}]
 ```
 
-To upgrade from 0.1.0 by script, add `"replace": true`. In Preferences, remove 0.1.0 first if installing over it is refused.
+To upgrade an earlier version by script, add `"replace": true`. In Preferences, remove the old version first if installing over it is refused.
 
 ## Inputs (entry `spur`)
 
@@ -64,9 +70,65 @@ Two helical gears on parallel shafts mesh when they have the same normal module,
 and helix angle, and **opposite hands**. Their centres sit (z1 + z2) × transverse module / 2
 apart.
 
+## Herringbone (entry `herringbone`)
+
+Takes the same inputs as `helical`, with a default face width of 20 mm. `hand` is the hand of
+the half on the +normal side; the other half has the opposite hand. A mating herringbone gear
+needs the same helix angle and the opposite hand. The halves cancel each other's thrust, so the
+gear needs no thrust bearing.
+
+## Straight bevel gears (entry `bevel`, shafts at 90°)
+
+| Field | Default | Meaning |
+|---|---|---|
+| `teeth` | 20 | This gear's teeth |
+| `mate_teeth` | 20 | The mating gear's teeth (equal teeth make a 45° miter pair) |
+| `module` | 2 | Module at the large end (heel) |
+| `pressure_angle` | 20 | 14.5, 20 or 25 degrees |
+| `face_width` | 0 | Tooth length along the cone in mm. 0 means a third of the cone distance; at most half |
+
+`bore`, `backlash`, `plane` and `flank_points` work as for `spur`.
+
+The heel lies on the sketch plane, and the teeth run along +normal towards the apex. The pitch
+angle is atan(teeth / mate_teeth). The heel profile uses Tredgold's approximation, the usual way
+straight bevel teeth are drawn: it is the profile of a spur gear with teeth / cos(pitch angle)
+teeth on the back cone, laid into the plane square to the axis. A scaled sweep then takes every
+point of it straight towards the cone apex.
+
+To make the mate, swap `teeth` and `mate_teeth`. The two axes meet at 90° at the cone apex, which
+is `apex_distance_mm` (returned) along each gear's axis from its heel plane.
+
+## Worms (entry `worm`) and worm wheels (entry `worm-wheel`)
+
+| Field | Default | Meaning |
+|---|---|---|
+| `module` | 2 | Axial module: the thread's axial pitch is π × module |
+| `starts` | 1 | Thread starts, 1–6. Gear ratio = wheel teeth / starts |
+| `diameter_factor` | 10 | q, 5–30: worm pitch diameter = q × module |
+| `pressure_angle` | 20 | Axial pressure angle |
+| `hand` | right | `right` or `left` |
+| `length` | 6 axial pitches | Worm length in mm (`worm` only; at most 40 turns of the thread) |
+| `teeth` | 30 | Wheel teeth (`worm-wheel` only) |
+| `thickness` | 10 | Wheel face width in mm (`worm-wheel` only) |
+
+`bore`, `backlash`, `plane` and `flank_points` work as for `spur`.
+
+The worm has a straight-sided axial profile (type ZA, Archimedean), with addendum 1 × module and
+dedendum 1.25 × module. Cut square to its axis, such a worm is a gear outline with one tooth per
+start. The plugin draws that section and sweeps it with a twist of one turn per lead, which is
+the exact thread. A SolidCraft sweep twists at most four turns, so a longer worm is built from
+sections of up to 3.5 turns. Each section starts where the last one ended, turned to match, and
+joins the body.
+
+The wheel is a helical gear with the same transverse module and pressure angle as the worm's
+axial ones, and a helix angle equal to the worm's lead angle, with the same hand. Its axis
+crosses the worm's at 90°, `centre_distance_mm` (returned) away. A real worm wheel is throated:
+its rim curves to wrap around the worm. This one is not, so the teeth touch at points rather
+than along lines. That is fine for light loads and 3D printing.
+
 ## Geometry
 
-Standard full-depth teeth:
+Spur, helical and herringbone gears have standard full-depth teeth:
 
 - addendum = 1 × module
 - dedendum = 1.25 × module
@@ -83,7 +145,7 @@ would differ near the root.
 ```bash
 rustup target add wasm32-unknown-unknown
 cargo install wasm-tools
-./build.sh          # tests, builds the component, writes gears-0.2.0.zip
+./build.sh          # tests, builds the component, writes gears-0.3.0.zip
 ```
 
 `host-check/` runs the packaged component inside SolidCraft's real runtime crate
@@ -114,5 +176,7 @@ MIT OR Apache-2.0).
 ## Status
 
 The plugin has been tested in SolidCraft's plugin runtime with a host that records each
-command call, not yet in the SolidCraft app. In particular, sweeping a profile with hundreds of
-segments and a twist is the heaviest step. If it is slow or fails, lower `flank_points`.
+command call, not yet in the SolidCraft app. Sweeping a profile with hundreds of segments,
+with a twist or a scale, is the heaviest step. If it is slow or fails, lower `flank_points`.
+The joins between worm sections and between herringbone halves meet face to face, which is the
+case most likely to trouble a CAD kernel; if one fails, send the error.

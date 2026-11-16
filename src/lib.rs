@@ -1,10 +1,10 @@
-//! SolidCraft gear plugin. Entry `spur` builds an involute spur gear as a native sketch +
-//! extrude; entry `helical` sweeps the transverse profile along the gear axis with a twist.
-//! Either way the result is an ordinary editable feature.
+//! SolidCraft gear plugin: spur, helical, herringbone, straight bevel and worm gears, plus a
+//! wheel to mate with a worm. Each entry computes a tooth profile and builds it with native
+//! sketches, extrudes and sweeps, so the result is an ordinary editable feature.
 
 pub mod gear;
 
-use gear::SpurGear;
+use gear::{BevelGear, SpurGear, Worm};
 use serde_json::{json, Value};
 use std::f64::consts::PI;
 
@@ -45,6 +45,10 @@ fn int(params: &Value, key: &'static str, default: u32) -> Result<u32, Failure> 
 pub enum Kind {
     Spur,
     Helical,
+    Herringbone,
+    Bevel,
+    Worm,
+    WormWheel,
 }
 
 impl Kind {
@@ -52,79 +56,94 @@ impl Kind {
         match entry {
             "spur" => Some(Kind::Spur),
             "helical" => Some(Kind::Helical),
+            "herringbone" => Some(Kind::Herringbone),
+            "bevel" => Some(Kind::Bevel),
+            "worm" => Some(Kind::Worm),
+            "worm-wheel" => Some(Kind::WormWheel),
             _ => None,
         }
     }
 }
 
-/// A straight path from the origin along `plane`'s normal, `length` long, drawn in a sketch on
-/// a perpendicular plane: (path sketch plane, start, end). Sketch axes per plane: XY → (+X, +Y),
-/// XZ → (+X, -Z), YZ → (+Y, +Z).
-fn axis_path(plane: &str, length: f64) -> (&'static str, [f64; 2]) {
+/// Where the point `d` mm along `plane`'s normal from the origin lies in the path sketch, and
+/// which plane that sketch is on. Sketch axes: XY → (+X, +Y), XZ → (+X, -Z), YZ → (+Y, +Z).
+fn path_plane(plane: &str) -> &'static str {
     match plane {
-        "XZ" => ("XY", [0.0, length]), // normal +Y
-        "YZ" => ("XY", [length, 0.0]), // normal +X
-        _ => ("XZ", [0.0, -length]),   // XY: normal +Z, which is -y in an XZ sketch
+        "XY" => "XZ",
+        _ => "XY",
     }
 }
 
-/// Build a gear. `params` is the entry's JSON input.
-pub fn build(host: &mut dyn Host, kind: Kind, params: &Value) -> Result<Value, Failure> {
-    let (helix_angle, right_hand) = match kind {
-        Kind::Spur => (0.0, true),
-        Kind::Helical => {
-            let beta = num(params, "helix_angle", 20.0)?;
-            if !(beta.is_finite() && beta > 0.0 && beta <= 45.0) {
-                return Err(Failure::Input("helix_angle", "must be more than 0 and at most 45 degrees".into()));
-            }
-            let right = match params.get("hand").and_then(Value::as_str).unwrap_or("right") {
-                "right" => true,
-                "left" => false,
-                _ => return Err(Failure::Input("hand", "must be right or left".into())),
-            };
-            (beta, right)
-        }
-    };
-    let g = SpurGear {
-        teeth: int(params, "teeth", 20)?,
-        module: num(params, "module", 2.0)?,
-        pressure_angle: num(params, "pressure_angle", 20.0)?,
-        helix_angle,
-        backlash: num(params, "backlash", 0.0)?,
-        flank_points: int(params, "flank_points", 8)?,
-    };
-    let thickness = num(params, "thickness", 10.0)?;
-    if !(thickness > 0.0 && thickness <= 10_000.0) {
-        return Err(Failure::Input("thickness", "must be more than 0 and at most 10000 mm".into()));
+fn axis_point(plane: &str, d: f64) -> Value {
+    let d = round(d);
+    match plane {
+        "XZ" => json!([0.0, d]), // normal +Y = XY sketch +y
+        "YZ" => json!([d, 0.0]), // normal +X = XY sketch +x
+        _ => json!([0.0, -d]),   // normal +Z = XZ sketch -y
     }
-    let bore = num(params, "bore", 0.0)?;
+}
+
+/// The inputs every entry shares.
+struct Common {
+    plane: &'static str,
+    bore: f64,
+    backlash: f64,
+    flank_points: u32,
+}
+
+fn common(params: &Value) -> Result<Common, Failure> {
     let plane = match params.get("plane").and_then(Value::as_str).unwrap_or("XY") {
-        p @ ("XY" | "XZ" | "YZ") => p,
+        "XY" => "XY",
+        "XZ" => "XZ",
+        "YZ" => "YZ",
         _ => return Err(Failure::Input("plane", "must be XY, XZ or YZ".into())),
     };
+    Ok(Common {
+        plane,
+        bore: num(params, "bore", 0.0)?,
+        backlash: num(params, "backlash", 0.0)?,
+        flank_points: int(params, "flank_points", 8)?,
+    })
+}
 
-    let points = g.profile().map_err(|(f, r)| Failure::Input(f, r))?;
-    let c = g.circles();
-    if bore < 0.0 || bore >= 2.0 * c.root * 0.9 {
-        return Err(Failure::Input("bore", format!("must be 0 (none) or less than {:.3} mm", 2.0 * c.root * 0.9)));
+fn length(params: &Value, key: &'static str, default: f64) -> Result<f64, Failure> {
+    let v = num(params, key, default)?;
+    if v > 0.0 && v <= 10_000.0 {
+        Ok(v)
+    } else {
+        Err(Failure::Input(key, "must be more than 0 and at most 10000 mm".into()))
     }
-    // Right hand: the teeth turn right-handed about the axis as they advance along it, which is
-    // the sweep's positive twist (right hand about the direction of travel).
-    let twist_deg = g.twist(thickness).to_degrees() * if right_hand { 1.0 } else { -1.0 };
+}
 
-    let name = match kind {
-        Kind::Spur => format!("Spur gear z{} m{}", g.teeth, g.module),
-        Kind::Helical => format!(
-            "Helical gear z{} m{} {}{}",
-            g.teeth,
-            g.module,
-            if right_hand { "RH" } else { "LH" },
-            g.helix_angle
-        ),
-    };
-    host.progress(0.1, "sketching profile");
-    host.run("sketch.create", json!({"plane": plane, "name": name}))?;
-    let pts: Vec<Value> = points.iter().map(|p| json!([round(p[0]), round(p[1])])).collect();
+/// True for right hand.
+fn hand(params: &Value) -> Result<bool, Failure> {
+    match params.get("hand").and_then(Value::as_str).unwrap_or("right") {
+        "right" => Ok(true),
+        "left" => Ok(false),
+        _ => Err(Failure::Input("hand", "must be right or left".into())),
+    }
+}
+
+fn check_bore(bore: f64, root_radius: f64) -> Result<(), Failure> {
+    let max = 2.0 * root_radius * 0.9;
+    if bore < 0.0 || bore >= max {
+        return Err(Failure::Input("bore", format!("must be 0 (none) or less than {max:.3} mm")));
+    }
+    Ok(())
+}
+
+fn profile_err((f, r): (&'static str, String)) -> Failure {
+    Failure::Input(f, r)
+}
+
+/// Sketch a closed profile (and optional bore) on `plane`, `offset` mm along its normal.
+fn sketch_profile(host: &mut dyn Host, plane: &str, offset: f64, name: &str, pts: &[[f64; 2]], bore: f64) -> Result<(), Failure> {
+    let mut args = json!({"plane": plane, "name": name});
+    if offset != 0.0 {
+        args["offset"] = json!(round(offset));
+    }
+    host.run("sketch.create", args)?;
+    let pts: Vec<Value> = pts.iter().map(|p| json!([round(p[0]), round(p[1])])).collect();
     host.run("sketch.line", json!({"points": pts, "closed": true}))?;
     if bore > 0.0 {
         host.run("sketch.circle.center", json!({"center": [0, 0], "diameter": bore}))?;
@@ -133,36 +152,64 @@ pub fn build(host: &mut dyn Host, kind: Kind, params: &Value) -> Result<Value, F
     if host.cancelled() {
         return Err(Failure::Cancelled);
     }
-    match kind {
-        Kind::Spur => {
-            host.progress(0.6, "extruding");
-            host.run("solid.extrude", json!({"distance": thickness, "operation": "new", "body_name": name}))?;
-        }
-        Kind::Helical => {
-            let path_name = format!("{name} axis");
-            let (path_plane, end) = axis_path(plane, thickness);
-            host.run("sketch.create", json!({"plane": path_plane, "name": path_name}))?;
-            host.run("sketch.line", json!({"points": [[0, 0], [round(end[0]), round(end[1])]], "ids": ["axis"]}))?;
-            host.run("sketch.finish", json!({}))?;
-            if host.cancelled() {
-                return Err(Failure::Cancelled);
-            }
-            host.progress(0.5, "sweeping teeth");
-            host.run(
-                "solid.sweep",
-                json!({
-                    "sketch": name,
-                    "path_sketch": path_name,
-                    "path": ["axis"],
-                    "twist": format!("{:.6} deg", twist_deg),
-                    "operation": "new",
-                    "body_name": name,
-                }),
-            )?;
+    Ok(())
+}
+
+/// One sketch of straight path segments along the axis, each from `a` to `b` mm, named `id`.
+fn sketch_axis(host: &mut dyn Host, plane: &str, name: &str, segments: &[(String, f64, f64)]) -> Result<(), Failure> {
+    host.run("sketch.create", json!({"plane": path_plane(plane), "name": name}))?;
+    for (id, a, b) in segments {
+        host.run("sketch.line", json!({"points": [axis_point(plane, *a), axis_point(plane, *b)], "ids": [id]}))?;
+    }
+    host.run("sketch.finish", json!({}))?;
+    Ok(())
+}
+
+/// Sweep `sketch` along `path` of `path_sketch`. The first sweep makes the body; later ones join it.
+fn sweep(host: &mut dyn Host, sketch: &str, path_sketch: &str, path: &str, body: &str, first: bool, extra: Value) -> Result<(), Failure> {
+    let mut args = json!({"sketch": sketch, "path_sketch": path_sketch, "path": [path], "body_name": body});
+    if first {
+        args["operation"] = json!("new");
+    } else {
+        args["operation"] = json!("join");
+        args["targets"] = json!([body]);
+    }
+    if let (Some(a), Some(e)) = (args.as_object_mut(), extra.as_object()) {
+        for (k, v) in e {
+            a.insert(k.clone(), v.clone());
         }
     }
-    host.progress(1.0, "done");
+    host.run("solid.sweep", args)?;
+    Ok(())
+}
 
+fn deg(x: f64) -> String {
+    format!("{x:.6} deg")
+}
+
+fn cylindrical_gear(params: &Value, c: &Common, helix_angle: f64) -> Result<SpurGear, Failure> {
+    Ok(SpurGear {
+        teeth: int(params, "teeth", 20)?,
+        module: num(params, "module", 2.0)?,
+        pressure_angle: num(params, "pressure_angle", 20.0)?,
+        helix_angle,
+        backlash: c.backlash,
+        flank_points: c.flank_points,
+    })
+}
+
+fn helix(params: &Value) -> Result<f64, Failure> {
+    let beta = num(params, "helix_angle", 20.0)?;
+    if beta.is_finite() && beta > 0.0 && beta <= 45.0 {
+        Ok(beta)
+    } else {
+        Err(Failure::Input("helix_angle", "must be more than 0 and at most 45 degrees".into()))
+    }
+}
+
+/// Facts about a spur, helical or herringbone gear (or worm wheel) for the reply.
+fn describe(g: &SpurGear, name: &str) -> Value {
+    let c = g.circles();
     let undercut = f64::from(g.teeth) < g.min_teeth_without_undercut();
     let mut out = json!({
         "body": name,
@@ -174,26 +221,243 @@ pub fn build(host: &mut dyn Host, kind: Kind, params: &Value) -> Result<Value, F
         "root_diameter_mm": 2.0 * c.root,
         "base_diameter_mm": 2.0 * c.base,
         "centre_distance_note": "two meshing gears sit (z1 + z2) * transverse module / 2 apart",
-        "profile_points": points.len(),
         "warnings": if undercut {
             vec![format!("{} teeth is below {:.1}: a real cut gear would be undercut; this profile is not", g.teeth, g.min_teeth_without_undercut())]
         } else { vec![] },
     });
-    if kind == Kind::Helical {
+    if g.helix_angle > 0.0 {
         out["helix_angle_deg"] = json!(g.helix_angle);
-        out["hand"] = json!(if right_hand { "right" } else { "left" });
         out["transverse_module_mm"] = json!(g.transverse_module());
         out["transverse_pressure_angle_deg"] = json!(g.transverse_pressure_angle().to_degrees());
-        out["twist_deg"] = json!(twist_deg);
         out["lead_mm"] = json!(PI * 2.0 * c.pitch / g.helix_angle.to_radians().tan());
-        out["mating_note"] = json!("a mating gear on a parallel shaft needs the same helix angle and the opposite hand");
     }
-    Ok(out)
+    out
+}
+
+/// Build a gear. `params` is the entry's JSON input.
+pub fn build(host: &mut dyn Host, kind: Kind, params: &Value) -> Result<Value, Failure> {
+    let c = common(params)?;
+    match kind {
+        Kind::Spur | Kind::Helical | Kind::WormWheel => {
+            let (g, right, mut extra) = if kind == Kind::WormWheel {
+                let w = worm(params, &c)?;
+                let right = hand(params)?;
+                let g = w.wheel(int(params, "teeth", 30)?);
+                let wc = w.circles();
+                let centre = wc.pitch + g.circles().pitch;
+                let ratio = f64::from(g.teeth) / f64::from(w.starts);
+                (g, right, json!({
+                    "worm_pitch_diameter_mm": 2.0 * wc.pitch,
+                    "centre_distance_mm": centre,
+                    "ratio": ratio,
+                    "mating_note": "the worm's axis crosses this wheel's axis at 90 degrees, centre_distance_mm away; use the same module, starts, diameter factor, pressure angle and hand",
+                    "approximation": "a helical wheel, not throated: line contact becomes point contact, fine for light loads and printing",
+                }))
+            } else if kind == Kind::Helical {
+                let beta = helix(params)?;
+                (cylindrical_gear(params, &c, beta)?, hand(params)?, json!({
+                    "mating_note": "a mating gear on a parallel shaft needs the same helix angle and the opposite hand",
+                }))
+            } else {
+                (cylindrical_gear(params, &c, 0.0)?, true, json!({}))
+            };
+            let thickness = length(params, "thickness", 10.0)?;
+            let pts = g.profile().map_err(profile_err)?;
+            check_bore(c.bore, g.circles().root)?;
+            let name = match kind {
+                Kind::Spur => format!("Spur gear z{} m{}", g.teeth, g.module),
+                Kind::Helical => format!("Helical gear z{} m{} {}{}", g.teeth, g.module, if right { "RH" } else { "LH" }, g.helix_angle),
+                _ => format!("Worm wheel z{} m{} {}", g.teeth, round(g.transverse_module()), if right { "RH" } else { "LH" }),
+            };
+            host.progress(0.1, "sketching profile");
+            sketch_profile(host, c.plane, 0.0, &name, &pts, c.bore)?;
+            let mut out = describe(&g, &name);
+            if kind == Kind::Spur {
+                host.progress(0.6, "extruding");
+                host.run("solid.extrude", json!({"distance": thickness, "operation": "new", "body_name": name}))?;
+            } else {
+                // Right hand: the teeth turn right-handed about the axis as they advance along it,
+                // which is the sweep's positive twist (right hand about the direction of travel).
+                let twist = g.twist(thickness).to_degrees() * if right { 1.0 } else { -1.0 };
+                let axis = format!("{name} axis");
+                sketch_axis(host, c.plane, &axis, &[("axis".into(), 0.0, thickness)])?;
+                host.progress(0.5, "sweeping teeth");
+                sweep(host, &name, &axis, "axis", &name, true, json!({"twist": deg(twist)}))?;
+                out["hand"] = json!(if right { "right" } else { "left" });
+                out["twist_deg"] = json!(twist);
+            }
+            out["profile_points"] = json!(pts.len());
+            merge(&mut out, extra.take());
+            host.progress(1.0, "done");
+            Ok(out)
+        }
+        Kind::Herringbone => {
+            let beta = helix(params)?;
+            let g = cylindrical_gear(params, &c, beta)?;
+            let right = hand(params)?;
+            let thickness = length(params, "thickness", 20.0)?;
+            let pts = g.profile().map_err(profile_err)?;
+            check_bore(c.bore, g.circles().root)?;
+            let name = format!("Herringbone gear z{} m{} {}deg", g.teeth, g.module, g.helix_angle);
+            let half = thickness / 2.0;
+            // Both halves start from the same profile at mid-width and sweep outwards. Equal
+            // twists about their own directions of travel would make one helix; opposite twists
+            // make the V. `hand` is the hand of the half on the +normal side.
+            let twist = g.twist(half).to_degrees() * if right { 1.0 } else { -1.0 };
+            let (upper, lower, axis) = (name.clone(), format!("{name} lower"), format!("{name} axis"));
+            host.progress(0.1, "sketching profiles");
+            sketch_profile(host, c.plane, half, &upper, &pts, c.bore)?;
+            sketch_profile(host, c.plane, half, &lower, &pts, c.bore)?;
+            sketch_axis(host, c.plane, &axis, &[("up".into(), half, thickness), ("down".into(), half, 0.0)])?;
+            host.progress(0.4, "sweeping upper half");
+            sweep(host, &upper, &axis, "up", &name, true, json!({"twist": deg(twist)}))?;
+            if host.cancelled() {
+                return Err(Failure::Cancelled);
+            }
+            host.progress(0.7, "sweeping lower half");
+            sweep(host, &lower, &axis, "down", &name, false, json!({"twist": deg(-twist)}))?;
+            host.progress(1.0, "done");
+            let mut out = describe(&g, &name);
+            merge(&mut out, json!({
+                "upper_hand": if right { "right" } else { "left" },
+                "twist_each_half_deg": twist.abs(),
+                "profile_points": pts.len(),
+                "mating_note": "a mating herringbone gear needs the same helix angle and the opposite hand; herringbone gears need no thrust bearing because the halves cancel",
+            }));
+            Ok(out)
+        }
+        Kind::Bevel => {
+            let b = BevelGear {
+                teeth: int(params, "teeth", 20)?,
+                mate_teeth: int(params, "mate_teeth", 20)?,
+                module: num(params, "module", 2.0)?,
+                pressure_angle: num(params, "pressure_angle", 20.0)?,
+                backlash: c.backlash,
+                flank_points: c.flank_points,
+                face_width: num(params, "face_width", 0.0)?,
+            };
+            let pts = b.profile().map_err(profile_err)?;
+            let delta = b.pitch_angle();
+            let root = b.pitch_radius() - 1.25 * b.module * delta.cos();
+            // The bore must clear the toe's root too.
+            check_bore(c.bore, root * b.toe_scale())?;
+            let name = format!("Bevel gear z{}:{} m{}", b.teeth, b.mate_teeth, b.module);
+            let axis = format!("{name} axis");
+            let len = b.axial_length();
+            host.progress(0.1, "sketching heel profile");
+            sketch_profile(host, c.plane, 0.0, &name, &pts, 0.0)?;
+            sketch_axis(host, c.plane, &axis, &[("axis".into(), 0.0, len)])?;
+            host.progress(0.4, "sweeping teeth towards the apex");
+            sweep(host, &name, &axis, "axis", &name, true, json!({"scale": round(b.toe_scale()).to_string()}))?;
+            if c.bore > 0.0 {
+                host.progress(0.8, "boring");
+                let bore = format!("{name} bore");
+                host.run("sketch.create", json!({"plane": c.plane, "name": bore}))?;
+                host.run("sketch.circle.center", json!({"center": [0, 0], "diameter": c.bore}))?;
+                host.run("sketch.finish", json!({}))?;
+                host.run("solid.extrude", json!({"sketch": bore, "distance": round(len), "operation": "cut", "targets": [name]}))?;
+            }
+            host.progress(1.0, "done");
+            Ok(json!({
+                "body": name,
+                "teeth": b.teeth,
+                "mate_teeth": b.mate_teeth,
+                "module_mm": b.module,
+                "pressure_angle_deg": b.pressure_angle,
+                "pitch_angle_deg": delta.to_degrees(),
+                "pitch_diameter_mm": 2.0 * b.pitch_radius(),
+                "outside_diameter_mm": 2.0 * (b.pitch_radius() + b.module * delta.cos()),
+                "cone_distance_mm": b.cone_distance(),
+                "face_width_mm": b.face(),
+                "axial_length_mm": len,
+                "apex_distance_mm": b.apex_distance(),
+                "profile_points": pts.len(),
+                "mating_note": "make the mate with teeth and mate_teeth swapped; the two axes meet at 90 degrees at the cone apex, apex_distance_mm along each gear's axis from its heel plane",
+                "approximation": "Tredgold's back-cone approximation, the usual way straight bevel teeth are drawn",
+            }))
+        }
+        Kind::Worm => {
+            let w = worm(params, &c)?;
+            let right = hand(params)?;
+            let wc = w.circles();
+            check_bore(c.bore, wc.root)?;
+            let lead = w.lead();
+            let len = length(params, "length", 6.0 * PI * w.module)?;
+            let turns = len / lead;
+            if turns > 40.0 {
+                return Err(Failure::Input("length", format!("must be at most 40 turns of the thread ({:.1} mm)", 40.0 * lead)));
+            }
+            let sign = if right { 1.0 } else { -1.0 };
+            // A sweep twists at most four turns: build longer worms from joined sections.
+            let sections = (turns / 3.5).ceil().max(1.0) as usize;
+            let seg = len / sections as f64;
+            let seg_twist = sign * 2.0 * PI * seg / lead;
+            let name = format!("Worm m{} x{} {}", w.module, w.starts, if right { "RH" } else { "LH" });
+            let axis = format!("{name} axis");
+            let segments: Vec<(String, f64, f64)> =
+                (0..sections).map(|k| (format!("s{k}"), seg * k as f64, seg * (k + 1) as f64)).collect();
+            host.progress(0.05, "sketching thread sections");
+            let mut points = 0;
+            let mut profiles = Vec::with_capacity(sections);
+            for k in 0..sections {
+                let pts = w.section(seg_twist * k as f64).map_err(profile_err)?;
+                points = pts.len();
+                let sk = if k == 0 { name.clone() } else { format!("{name} section {}", k + 1) };
+                sketch_profile(host, c.plane, seg * k as f64, &sk, &pts, c.bore)?;
+                profiles.push(sk);
+            }
+            sketch_axis(host, c.plane, &axis, &segments)?;
+            for (k, sk) in profiles.iter().enumerate() {
+                host.progress(0.2 + 0.8 * k as f32 / sections as f32, "sweeping thread");
+                sweep(host, sk, &axis, &segments[k].0, &name, k == 0, json!({"twist": deg(seg_twist.to_degrees())}))?;
+                if host.cancelled() {
+                    return Err(Failure::Cancelled);
+                }
+            }
+            host.progress(1.0, "done");
+            Ok(json!({
+                "body": name,
+                "starts": w.starts,
+                "hand": if right { "right" } else { "left" },
+                "axial_module_mm": w.module,
+                "axial_pitch_mm": PI * w.module,
+                "lead_mm": lead,
+                "lead_angle_deg": w.lead_angle().to_degrees(),
+                "pitch_diameter_mm": 2.0 * wc.pitch,
+                "tip_diameter_mm": 2.0 * wc.tip,
+                "root_diameter_mm": 2.0 * wc.root,
+                "length_mm": len,
+                "sections": sections,
+                "profile_points": points,
+                "mating_note": "make the wheel with the worm-wheel entry using the same module, starts, diameter factor, pressure angle and hand",
+            }))
+        }
+    }
+}
+
+fn worm(params: &Value, c: &Common) -> Result<Worm, Failure> {
+    let w = Worm {
+        starts: int(params, "starts", 1)?,
+        module: num(params, "module", 2.0)?,
+        diameter_factor: num(params, "diameter_factor", 10.0)?,
+        pressure_angle: num(params, "pressure_angle", 20.0)?,
+        backlash: c.backlash,
+        flank_points: c.flank_points,
+    };
+    w.validate().map_err(profile_err)?;
+    Ok(w)
+}
+
+fn merge(out: &mut Value, extra: Value) {
+    if let (Some(o), Value::Object(e)) = (out.as_object_mut(), extra) {
+        o.extend(e);
+    }
 }
 
 /// Micrometre precision keeps the JSON small.
 fn round(x: f64) -> f64 {
-    (x * 1e6).round() / 1e6
+    // `+ 0.0` turns -0.0 into 0.0.
+    (x * 1e6).round() / 1e6 + 0.0
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -292,7 +556,7 @@ mod tests {
         assert_eq!(cmds, ["sketch.create", "sketch.line", "sketch.finish", "sketch.create", "sketch.line", "sketch.finish", "solid.sweep"]);
         // XY profile: path drawn on XZ, where world +Z is sketch -y.
         assert_eq!(h.0[3].1["plane"], json!("XZ"));
-        assert_eq!(h.0[4].1["points"], json!([[0, 0], [0.0, -12.0]]));
+        assert_eq!(h.0[4].1["points"], json!([[0.0, 0.0], [0.0, -12.0]]));
         let sweep = &h.0[6].1;
         assert_eq!(sweep["sketch"], h.0[0].1["name"]);
         assert_eq!(sweep["path_sketch"], h.0[3].1["name"]);
@@ -304,7 +568,7 @@ mod tests {
         let mut h = Fake::default();
         let out = build(&mut h, Kind::Helical, &json!({"hand": "left", "plane": "YZ", "thickness": 12})).unwrap();
         assert!(out["twist_deg"].as_f64().unwrap() < 0.0);
-        assert_eq!(h.0[4].1["points"], json!([[0, 0], [12.0, 0.0]]));
+        assert_eq!(h.0[4].1["points"], json!([[0.0, 0.0], [12.0, 0.0]]));
     }
 
     #[test]
@@ -315,4 +579,99 @@ mod tests {
             assert!(h.0.is_empty());
         }
     }
+
+    fn names(h: &Fake) -> Vec<&str> {
+        h.0.iter().map(|(c, _)| c.as_str()).collect()
+    }
+
+    #[test]
+    fn herringbone_sweeps_both_halves_out_from_the_middle_with_opposite_twists() {
+        let mut h = Fake::default();
+        let out = build(&mut h, Kind::Herringbone, &json!({"thickness": 20, "helix_angle": 30, "bore": 6})).unwrap();
+        assert_eq!(
+            names(&h),
+            [
+                "sketch.create", "sketch.line", "sketch.circle.center", "sketch.finish",
+                "sketch.create", "sketch.line", "sketch.circle.center", "sketch.finish",
+                "sketch.create", "sketch.line", "sketch.line", "sketch.finish",
+                "solid.sweep", "solid.sweep",
+            ]
+        );
+        assert_eq!(h.0[0].1["offset"], json!(10.0));
+        assert_eq!(h.0[4].1["offset"], json!(10.0));
+        assert_eq!(h.0[9].1["points"], json!([[0.0, -10.0], [0.0, -20.0]]));
+        assert_eq!(h.0[10].1["points"], json!([[0.0, -10.0], [0.0, 0.0]]));
+        let (up, down) = (&h.0[12].1, &h.0[13].1);
+        assert_eq!((up["operation"].clone(), down["operation"].clone()), (json!("new"), json!("join")));
+        assert_eq!(down["targets"], json!([up["body_name"].clone()]));
+        assert_ne!(up["sketch"], down["sketch"]);
+        let t = out["twist_each_half_deg"].as_f64().unwrap();
+        assert_eq!(up["twist"], json!(format!("{t:.6} deg")));
+        assert_eq!(down["twist"], json!(format!("{:.6} deg", -t)));
+    }
+
+    #[test]
+    fn bevel_sweeps_towards_the_apex_and_bores_only_itself() {
+        let mut h = Fake::default();
+        let out = build(&mut h, Kind::Bevel, &json!({"teeth": 20, "mate_teeth": 40, "bore": 8})).unwrap();
+        assert_eq!(
+            names(&h),
+            [
+                "sketch.create", "sketch.line", "sketch.finish",
+                "sketch.create", "sketch.line", "sketch.finish",
+                "solid.sweep",
+                "sketch.create", "sketch.circle.center", "sketch.finish", "solid.extrude",
+            ]
+        );
+        assert_eq!(h.0[6].1["scale"], json!("0.666667"));
+        assert!(h.0[6].1.get("twist").is_none());
+        let cut = &h.0[10].1;
+        assert_eq!((cut["operation"].clone(), cut["targets"].clone()), (json!("cut"), json!([out["body"].clone()])));
+        assert!((out["pitch_angle_deg"].as_f64().unwrap() - 0.5f64.atan().to_degrees()).abs() < 1e-9);
+        // The mate is the other half of the 90-degree pair.
+        let mut h2 = Fake::default();
+        let mate = build(&mut h2, Kind::Bevel, &json!({"teeth": 40, "mate_teeth": 20})).unwrap();
+        let sum = out["pitch_angle_deg"].as_f64().unwrap() + mate["pitch_angle_deg"].as_f64().unwrap();
+        assert!((sum - 90.0).abs() < 1e-9);
+        assert!((out["cone_distance_mm"].as_f64().unwrap() - mate["cone_distance_mm"].as_f64().unwrap()).abs() < 1e-9);
+    }
+
+    #[test]
+    fn long_worms_are_joined_sections_that_line_up() {
+        let mut h = Fake::default();
+        // 10 turns of a single-start m2 worm: three sections of 3.33 turns.
+        let lead = PI * 2.0;
+        let out = build(&mut h, Kind::Worm, &json!({"length": 10.0 * lead})).unwrap();
+        assert_eq!(out["sections"], json!(3));
+        let sweeps: Vec<&Value> = h.0.iter().filter(|(c, _)| c == "solid.sweep").map(|(_, a)| a).collect();
+        assert_eq!(sweeps.len(), 3);
+        assert_eq!(sweeps[0]["operation"], json!("new"));
+        assert!(sweeps[1..].iter().all(|s| s["operation"] == json!("join")));
+        let twist: f64 = sweeps[0]["twist"].as_str().unwrap().trim_end_matches(" deg").parse().unwrap();
+        assert!((twist - 1200.0).abs() < 1e-6);
+        // Each section's sketch starts where the previous sweep ended, turned by its twist.
+        let creates: Vec<&Value> = h.0.iter().filter(|(c, a)| c == "sketch.create" && a["plane"] == json!("XY")).map(|(_, a)| a).collect();
+        assert_eq!(creates.len(), 3);
+        assert!((creates[2]["offset"].as_f64().unwrap() - 2.0 * 10.0 * lead / 3.0).abs() < 1e-5);
+        let lines: Vec<&Value> = h.0.iter().filter(|(c, a)| c == "sketch.line" && a["closed"] == json!(true)).map(|(_, a)| a).collect();
+        let first_angle = |v: &Value| v["points"][0][1].as_f64().unwrap().atan2(v["points"][0][0].as_f64().unwrap());
+        let turned = (first_angle(lines[1]) - first_angle(lines[0])).rem_euclid(2.0 * PI);
+        assert!((turned - 1200f64.to_radians().rem_euclid(2.0 * PI)).abs() < 1e-5);
+
+        let mut h = Fake::default();
+        assert!(build(&mut h, Kind::Worm, &json!({"length": 41.0 * lead})).is_err());
+        assert!(h.0.is_empty());
+    }
+
+    #[test]
+    fn worm_wheel_is_a_helical_gear_at_the_worm_lead_angle() {
+        let mut h = Fake::default();
+        let out = build(&mut h, Kind::WormWheel, &json!({"teeth": 30, "starts": 2, "diameter_factor": 10})).unwrap();
+        assert_eq!(names(&h).last(), Some(&"solid.sweep"));
+        assert!((out["helix_angle_deg"].as_f64().unwrap() - 0.2f64.atan().to_degrees()).abs() < 1e-9);
+        assert!((out["pitch_diameter_mm"].as_f64().unwrap() - 60.0).abs() < 1e-9);
+        assert!((out["centre_distance_mm"].as_f64().unwrap() - 40.0).abs() < 1e-9);
+        assert_eq!(out["ratio"], json!(15.0));
+    }
 }
+
