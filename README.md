@@ -1,6 +1,6 @@
 # Gears: a SolidCraft plugin
 
-Makes involute gears in SolidCraft. It adds nine entries to the Model ribbon. You fill in a
+Makes involute gears in SolidCraft. It adds ten entries to the Model ribbon. You fill in a
 form, and the plugin computes the tooth profile, then builds it with ordinary SolidCraft
 commands:
 
@@ -13,6 +13,7 @@ commands:
 | `worm` | The worm's section square to its axis, swept with one turn per lead; long worms in joined sections |
 | `worm-wheel` | A helical gear that meshes with a `worm` |
 | `internal` | A ring with teeth on the inside: an outer circle and the toothed inner outline, extruded |
+| `planetary` | A sun, its planets and a ring, each extruded as its own body, all placed in mesh |
 | `rack` | A straight rack, extruded, plus (optionally) a spur pinion extruded in mesh with it |
 | `hypoid` | One member of a hypoid pair: the heel profile swept towards the apex while it shrinks and twists (an approximation, see below) |
 
@@ -24,10 +25,10 @@ whole run is a single undo step. The plugin needs no file, network or settings a
 ## Install
 
 In SolidCraft (desktop), open **Preferences > Plugins > Install plugin…** and pick
-`gears-0.6.0.zip`. It asks for no permissions. You can also install it from a script:
+`gears-0.7.0.zip`. It asks for no permissions. You can also install it from a script:
 
 ```json
-[{"command":"plugin.install","params":{"path":"gears-0.6.0.zip"}}]
+[{"command":"plugin.install","params":{"path":"gears-0.7.0.zip"}}]
 ```
 
 To upgrade an earlier version by script, add `"replace": true`. In Preferences, remove the old version first if installing over it is refused.
@@ -150,6 +151,33 @@ ring's centre. Keep the ring at least 12 teeth larger than the pinion (15 below 
 interfere. Below about 34 teeth at 20°, the ring's tips lie inside the base circle, so their
 innermost part is radial rather than involute; the reply warns.
 
+## Planetary gear sets (entry `planetary`)
+
+![A 12/18/48 set with three planets](preview-planetary.png)
+
+| Field | Default | Meaning |
+|---|---|---|
+| `sun_teeth` | 12 | |
+| `planet_teeth` | 18 | |
+| `planets` | 3 | 2–12 planets, evenly spaced |
+| `module` | 2 | Shared by all parts |
+| `pressure_angle` | 20 | 14.5, 20 or 25 degrees |
+| `thickness` | 10 | Face width of every part, mm |
+| `rim` | 3 × module | The ring's rim outside its tooth roots, mm |
+| `sun_bore`, `planet_bore` | 0 | Bore diameters, mm |
+
+`backlash`, `plane` and `flank_points` work as for `spur`.
+
+The ring has sun + 2 × planet teeth. Every part is its own body, centred on the sketch origin
+(sun and ring) or on the carrier circle (planets, the first on +x). Each planet is turned so it
+meshes with both the sun and the ring.
+
+Planets can only be spaced evenly when (sun teeth + ring teeth) divides by the number of planets,
+and neighbouring planets must not touch; the entry refuses a set that breaks either rule and says
+which. With the ring held, the sun drives the carrier at 1 + ring/sun teeth : 1 (5 : 1 for the
+default set). The reply also gives the carrier radius and each planet's centre for building a
+carrier.
+
 ## Rack and pinion (entry `rack`)
 
 | Field | Default | Meaning |
@@ -229,7 +257,7 @@ would differ near the root.
 ```bash
 rustup target add wasm32-unknown-unknown
 cargo install wasm-tools
-./build.sh          # tests, builds the component, writes gears-0.6.0.zip
+./build.sh          # tests, builds the component, writes gears-0.7.0.zip
 ```
 
 `host-check/` runs the packaged component inside SolidCraft's real runtime crate

@@ -4,7 +4,7 @@
 
 pub mod gear;
 
-use gear::{BevelGear, Hypoid, InternalGear, Rack, SpurGear, Worm};
+use gear::{BevelGear, Hypoid, InternalGear, Planetary, Rack, SpurGear, Worm};
 use serde_json::{json, Value};
 use std::f64::consts::PI;
 
@@ -52,6 +52,7 @@ pub enum Kind {
     Rack,
     Hypoid,
     Internal,
+    Planetary,
 }
 
 impl Kind {
@@ -66,6 +67,7 @@ impl Kind {
             "rack" => Some(Kind::Rack),
             "hypoid" => Some(Kind::Hypoid),
             "internal" => Some(Kind::Internal),
+            "planetary" => Some(Kind::Planetary),
             _ => None,
         }
     }
@@ -544,6 +546,73 @@ pub fn build(host: &mut dyn Host, kind: Kind, params: &Value) -> Result<Value, F
                 "warnings": warnings,
             }))
         }
+        Kind::Planetary => {
+            let module = num(params, "module", 2.0)?;
+            let p = Planetary {
+                sun_teeth: int(params, "sun_teeth", 12)?,
+                planet_teeth: int(params, "planet_teeth", 18)?,
+                planets: int(params, "planets", 3)?,
+                module,
+                pressure_angle: num(params, "pressure_angle", 20.0)?,
+                backlash: c.backlash,
+                flank_points: c.flank_points,
+                rim: num(params, "rim", 3.0 * module)?,
+            };
+            let thickness = length(params, "thickness", 10.0)?;
+            let ((sun, _), planets, (ring, _)) = p.layout().map_err(profile_err)?;
+            let sun_bore = num(params, "sun_bore", 0.0)?;
+            check_bore(sun_bore, p.carrier_radius() - module * f64::from(p.planet_teeth) / 2.0 - 1.25 * module)
+                .map_err(|f| match f { Failure::Input(_, r) => Failure::Input("sun_bore", r), other => other })?;
+            let planet_bore = num(params, "planet_bore", 0.0)?;
+            check_bore(planet_bore, module * f64::from(p.planet_teeth) / 2.0 - 1.25 * module)
+                .map_err(|f| match f { Failure::Input(_, r) => Failure::Input("planet_bore", r), other => other })?;
+
+            let z = p.ring_teeth();
+            let tag = format!("z{}/{}/{} m{}", p.sun_teeth, p.planet_teeth, z, module);
+            let mut bodies = Vec::new();
+            let mut extrude = |host: &mut dyn Host, name: &str| -> Result<(), Failure> {
+                host.run("solid.extrude", json!({"sketch": name, "distance": thickness, "operation": "new", "body_name": name}))?;
+                bodies.push(name.to_string());
+                Ok(())
+            };
+            host.progress(0.05, "sun");
+            let sun_name = format!("Sun {tag}");
+            sketch_profile(host, c.plane, 0.0, &sun_name, &sun, sun_bore)?;
+            extrude(host, &sun_name)?;
+            let mut centres = Vec::new();
+            for (i, (pts, centre)) in planets.iter().enumerate() {
+                host.progress(0.1 + 0.6 * i as f32 / planets.len() as f32, "planets");
+                let name = format!("Planet {} {tag}", i + 1);
+                sketch_profile_at(host, c.plane, 0.0, &name, pts, planet_bore, *centre)?;
+                extrude(host, &name)?;
+                centres.push(json!([round(centre[0]), round(centre[1])]));
+            }
+            host.progress(0.8, "ring");
+            let ring_name = format!("Ring {tag}");
+            sketch_profile(host, c.plane, 0.0, &ring_name, &ring, 2.0 * p.ring().outer_radius())?;
+            extrude(host, &ring_name)?;
+            host.progress(1.0, "done");
+            let limit = 2.0 / p.pressure_angle.to_radians().sin().powi(2);
+            let warnings: Vec<String> = [p.sun_teeth, p.planet_teeth]
+                .iter()
+                .filter(|&&t| f64::from(t) < limit)
+                .map(|t| format!("{t} teeth is below the undercut limit ({limit:.1}): real cut gears would be undercut; these profiles are not"))
+                .collect();
+            Ok(json!({
+                "bodies": bodies,
+                "sun_teeth": p.sun_teeth,
+                "planet_teeth": p.planet_teeth,
+                "ring_teeth": z,
+                "planets": p.planets,
+                "module_mm": module,
+                "carrier_radius_mm": p.carrier_radius(),
+                "planet_centres_mm": centres,
+                "ratio_ring_fixed": p.ratio(),
+                "ratio_note": "ring held: sun to carrier is ratio_ring_fixed : 1; carrier held: sun to ring is ring/sun teeth, reversed; sun held: ring to carrier is 1 + sun/ring teeth",
+                "ring_outer_diameter_mm": 2.0 * p.ring().outer_radius(),
+                "warnings": warnings,
+            }))
+        }
         Kind::Worm => {
             let w = worm(params, &c)?;
             let right = hand(params)?;
@@ -938,6 +1007,26 @@ mod tests {
         assert_eq!(out["warnings"].as_array().unwrap().len(), 1, "50 in 60 is too close");
         let mut h = Fake::default();
         assert!(build(&mut h, Kind::Internal, &json!({"teeth": 6})).is_err());
+        assert!(h.0.is_empty());
+    }
+
+    #[test]
+    fn planetary_builds_sun_planets_and_ring_as_separate_bodies() {
+        let mut h = Fake::default();
+        let out = build(&mut h, Kind::Planetary, &json!({"sun_teeth": 12, "planet_teeth": 18, "planets": 3, "planet_bore": 5})).unwrap();
+        let extrudes: Vec<&Value> = h.0.iter().filter(|(c, _)| c == "solid.extrude").map(|(_, a)| a).collect();
+        assert_eq!(extrudes.len(), 5);
+        assert!(extrudes.iter().all(|e| e["operation"] == json!("new")));
+        assert_eq!(out["ring_teeth"], json!(48));
+        assert_eq!(out["ratio_ring_fixed"], json!(5.0));
+        // Each planet's bore sits at its centre.
+        let bores: Vec<&Value> = h.0.iter().filter(|(c, _)| c == "sketch.circle.center").map(|(_, a)| a).collect();
+        assert_eq!(bores.len(), 4, "three planet bores and the ring's outer circle");
+        assert_eq!(bores[0]["center"], json!([30.0, 0.0]));
+        assert_eq!(out["planet_centres_mm"][0], json!([30.0, 0.0]));
+
+        let mut h = Fake::default();
+        assert!(build(&mut h, Kind::Planetary, &json!({"planets": 7})).is_err());
         assert!(h.0.is_empty());
     }
 }

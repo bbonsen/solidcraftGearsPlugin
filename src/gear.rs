@@ -550,6 +550,120 @@ impl InternalGear {
     }
 }
 
+/// A planetary (epicyclic) set: a sun, `planets` equal planets on a carrier and an internal ring,
+/// all with the same module and pressure angle. Ring teeth = sun + 2 × planet.
+#[derive(Clone, Debug)]
+pub struct Planetary {
+    pub sun_teeth: u32,
+    pub planet_teeth: u32,
+    pub planets: u32,
+    pub module: f64,
+    pub pressure_angle: f64,
+    pub backlash: f64,
+    pub flank_points: u32,
+    pub rim: f64,
+}
+
+/// A part's outline, placed: points in the sketch plane and its centre.
+pub type Placed = (Vec<[f64; 2]>, [f64; 2]);
+
+fn place(pts: Vec<[f64; 2]>, rot: f64, centre: [f64; 2]) -> Placed {
+    let (sin, cos) = rot.sin_cos();
+    (pts.iter().map(|p| [p[0] * cos - p[1] * sin + centre[0], p[0] * sin + p[1] * cos + centre[1]]).collect(), centre)
+}
+
+impl Planetary {
+    pub fn ring_teeth(&self) -> u32 {
+        self.sun_teeth + 2 * self.planet_teeth
+    }
+
+    fn spur(&self, teeth: u32) -> SpurGear {
+        SpurGear {
+            teeth,
+            module: self.module,
+            pressure_angle: self.pressure_angle,
+            helix_angle: 0.0,
+            backlash: self.backlash,
+            flank_points: self.flank_points,
+        }
+    }
+
+    pub fn ring(&self) -> InternalGear {
+        InternalGear {
+            teeth: self.ring_teeth(),
+            module: self.module,
+            pressure_angle: self.pressure_angle,
+            backlash: self.backlash,
+            flank_points: self.flank_points,
+            rim: self.rim,
+        }
+    }
+
+    /// Distance from the sun's centre to each planet's.
+    pub fn carrier_radius(&self) -> f64 {
+        self.module * f64::from(self.sun_teeth + self.planet_teeth) / 2.0
+    }
+
+    /// Speed ratio with the ring held, the sun driving and the carrier as output.
+    pub fn ratio(&self) -> f64 {
+        1.0 + f64::from(self.ring_teeth()) / f64::from(self.sun_teeth)
+    }
+
+    pub fn validate(&self) -> Result<(), (&'static str, String)> {
+        self.spur(self.sun_teeth).validate().map_err(|(_, r)| ("sun_teeth", r))?;
+        self.spur(self.planet_teeth).validate().map_err(|(_, r)| ("planet_teeth", r))?;
+        self.ring().validate().map_err(|(f, r)| if f == "teeth" { ("planet_teeth", format!("ring: {r}")) } else { (f, r) })?;
+        if !(2..=12).contains(&self.planets) {
+            return Err(("planets", "must be 2..=12".into()));
+        }
+        if (self.sun_teeth + self.ring_teeth()) % self.planets != 0 {
+            return Err((
+                "planets",
+                format!(
+                    "{} planets cannot be spaced evenly: sun + ring teeth ({}) must divide by the number of planets",
+                    self.planets,
+                    self.sun_teeth + self.ring_teeth()
+                ),
+            ));
+        }
+        // Neighbouring planets' tip circles must not touch.
+        let gap = 2.0 * self.carrier_radius() * (PI / f64::from(self.planets)).sin();
+        let tip = 2.0 * self.spur(self.planet_teeth).circles().tip;
+        if gap <= tip + 0.5 * self.module {
+            return Err(("planets", format!("{} planets of {} teeth collide; use fewer or smaller planets", self.planets, self.planet_teeth)));
+        }
+        Ok(())
+    }
+
+    /// (sun, planets, ring) outlines in place. The sun has a tooth on +x and planet 0 sits on +x.
+    pub fn layout(&self) -> Result<(Placed, Vec<Placed>, Placed), (&'static str, String)> {
+        self.validate()?;
+        let (zs, zp, zr) = (f64::from(self.sun_teeth), f64::from(self.planet_teeth), f64::from(self.ring_teeth()));
+        let sun = place(self.spur(self.sun_teeth).profile()?, 0.0, [0.0, 0.0]);
+        let planet = self.spur(self.planet_teeth).profile()?;
+        let a = self.carrier_radius();
+        let mut planets = Vec::new();
+        let mut ring_rot = 0.0;
+        for i in 0..self.planets {
+            let th = 2.0 * PI * f64::from(i) / f64::from(self.planets);
+            // The sun's tooth phase where it meets this planet (whole numbers: a tooth centred).
+            let f = th * zs / (2.0 * PI);
+            // The planet faces the sun (direction th + π) with the mirrored phase, half a tooth on:
+            // a gap where the sun has a tooth.
+            let psi = th + PI - PI * (1.0 - 2.0 * f) / zp;
+            planets.push(place(planet.clone(), psi, [a * th.cos(), a * th.sin()]));
+            if i == 0 {
+                // The ring meets planet 0 on the far side (direction th) with the same phase
+                // sense, half a tooth on. Even spacing makes this hold for every planet.
+                let g = (th - psi) * zp / (2.0 * PI);
+                ring_rot = th - (g + 0.5) * 2.0 * PI / zr;
+            }
+        }
+        let ring = (self.ring().profile(ring_rot)?, [0.0, 0.0]);
+        Ok((sun, planets, ring))
+    }
+}
+
 /// A straight-toothed rack for a spur pinion. The pitch line lies on y = 0 and the teeth point
 /// up (+y), the first starting at x = 0; the bar's back is `back` mm below the root.
 #[derive(Clone, Debug)]
@@ -1052,6 +1166,74 @@ mod tests {
         ] {
             assert!(g.profile(0.0).is_err(), "{g:?}");
         }
+    }
+
+    fn inside_poly(poly: &[[f64; 2]], p: [f64; 2]) -> bool {
+        let mut odd = false;
+        for i in 0..poly.len() {
+            let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
+            if (a[1] > p[1]) != (b[1] > p[1]) && p[0] < a[0] + (p[1] - a[1]) * (b[0] - a[0]) / (b[1] - a[1]) {
+                odd = !odd;
+            }
+        }
+        odd
+    }
+
+    fn planetary(zs: u32, zp: u32, n: u32) -> Planetary {
+        Planetary { sun_teeth: zs, planet_teeth: zp, planets: n, module: 2.0, pressure_angle: 20.0, backlash: 0.05, flank_points: 12, rim: 5.0 }
+    }
+
+    #[test]
+    fn every_planet_meshes_with_sun_and_ring() {
+        for (zs, zp, n) in [(12, 18, 3), (24, 12, 4), (20, 16, 2), (30, 15, 5), (17, 13, 3)] {
+            let p = planetary(zs, zp, n);
+            let ((sun, _), planets, (ring, _)) = p.layout().unwrap();
+            assert_eq!(planets.len(), n as usize);
+            for (i, (pl, c)) in planets.iter().enumerate() {
+                assert!((polar(*c).0 - p.carrier_radius()).abs() < 1e-9);
+                for &q in pl {
+                    assert!(!inside_poly(&sun, q), "{zs}/{zp}/{n} planet {i} point in the sun");
+                    assert!(inside_poly(&ring, q), "{zs}/{zp}/{n} planet {i} point in the ring");
+                }
+                for &q in &sun {
+                    assert!(!inside_poly(pl, q), "{zs}/{zp}/{n} sun point in planet {i}");
+                }
+                for &q in &ring {
+                    assert!(!inside_poly(pl, q), "{zs}/{zp}/{n} ring point in planet {i}");
+                }
+                // Engaged both sides: reaches into the sun's tooth spaces and the ring's.
+                let rs = p.spur(zs).circles().tip;
+                assert!(pl.iter().any(|q| polar(*q).0 < rs - 0.5), "planet {i} misses the sun");
+                assert!(pl.iter().any(|q| polar(*q).0 > p.ring().circles().tip + 0.5), "planet {i} misses the ring");
+            }
+        }
+    }
+
+    #[test]
+    fn a_planet_turned_half_a_tooth_is_caught() {
+        let p = planetary(12, 18, 3);
+        let ((sun, _), planets, (ring, _)) = p.layout().unwrap();
+        let (pl, c) = &planets[0];
+        let t = PI / 18.0;
+        let turned: Vec<[f64; 2]> = pl
+            .iter()
+            .map(|q| {
+                let (x, y) = (q[0] - c[0], q[1] - c[1]);
+                [x * t.cos() - y * t.sin() + c[0], x * t.sin() + y * t.cos() + c[1]]
+            })
+            .collect();
+        assert!(turned.iter().any(|&q| inside_poly(&sun, q) || !inside_poly(&ring, q)));
+    }
+
+    #[test]
+    fn planetary_checks_assembly_and_clearance() {
+        assert_eq!(planetary(12, 18, 3).ring_teeth(), 48);
+        assert!((planetary(12, 18, 3).ratio() - 5.0).abs() < 1e-12);
+        // 12 + 48 = 60 does not divide by 7.
+        assert_eq!(planetary(12, 18, 7).layout().unwrap_err().0, "planets");
+        // 6 planets of 18 teeth around a 12-tooth sun collide (60 divides by 6).
+        assert_eq!(planetary(12, 18, 6).layout().unwrap_err().0, "planets");
+        assert_eq!(planetary(3, 18, 3).layout().unwrap_err().0, "sun_teeth");
     }
 }
 
