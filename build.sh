@@ -13,5 +13,6 @@ import zipfile
 with zipfile.ZipFile("gears-0.10.0.zip", "w", zipfile.ZIP_DEFLATED) as z:
     for f in ("plugin.json", "gears.wasm"):
         z.write(f"package/{f}", f"gears-0.10.0/{f}")
+    z.write("LICENSE", "gears-0.10.0/LICENSE")
 PY
 echo "built gears-0.10.0.zip"
