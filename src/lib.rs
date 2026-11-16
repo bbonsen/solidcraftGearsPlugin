@@ -4,7 +4,7 @@
 
 pub mod gear;
 
-use gear::{BevelGear, Rack, SpurGear, Worm};
+use gear::{BevelGear, Hypoid, Rack, SpurGear, Worm};
 use serde_json::{json, Value};
 use std::f64::consts::PI;
 
@@ -50,6 +50,7 @@ pub enum Kind {
     Worm,
     WormWheel,
     Rack,
+    Hypoid,
 }
 
 impl Kind {
@@ -62,6 +63,7 @@ impl Kind {
             "worm" => Some(Kind::Worm),
             "worm-wheel" => Some(Kind::WormWheel),
             "rack" => Some(Kind::Rack),
+            "hypoid" => Some(Kind::Hypoid),
             _ => None,
         }
     }
@@ -350,27 +352,10 @@ pub fn build(host: &mut dyn Host, kind: Kind, params: &Value) -> Result<Value, F
                 flank_points: c.flank_points,
                 face_width: num(params, "face_width", 0.0)?,
             };
-            let pts = b.profile().map_err(profile_err)?;
-            let delta = b.pitch_angle();
-            let root = b.pitch_radius() - 1.25 * b.module * delta.cos();
-            // The bore must clear the toe's root too.
-            check_bore(c.bore, root * b.toe_scale())?;
             let name = format!("Bevel gear z{}:{} m{}", b.teeth, b.mate_teeth, b.module);
-            let axis = format!("{name} axis");
+            let pts = cone_gear(host, &c, &b, &name, 0.0)?;
+            let delta = b.pitch_angle();
             let len = b.axial_length();
-            host.progress(0.1, "sketching heel profile");
-            sketch_profile(host, c.plane, 0.0, &name, &pts, 0.0)?;
-            sketch_axis(host, c.plane, &axis, &[("axis".into(), 0.0, len)])?;
-            host.progress(0.4, "sweeping teeth towards the apex");
-            sweep(host, &name, &axis, "axis", &name, true, json!({"scale": round(b.toe_scale()).to_string()}))?;
-            if c.bore > 0.0 {
-                host.progress(0.8, "boring");
-                let bore = format!("{name} bore");
-                host.run("sketch.create", json!({"plane": c.plane, "name": bore}))?;
-                host.run("sketch.circle.center", json!({"center": [0, 0], "diameter": c.bore}))?;
-                host.run("sketch.finish", json!({}))?;
-                host.run("solid.extrude", json!({"sketch": bore, "distance": round(len), "operation": "cut", "targets": [name]}))?;
-            }
             host.progress(1.0, "done");
             Ok(json!({
                 "body": name,
@@ -385,7 +370,7 @@ pub fn build(host: &mut dyn Host, kind: Kind, params: &Value) -> Result<Value, F
                 "face_width_mm": b.face(),
                 "axial_length_mm": len,
                 "apex_distance_mm": b.apex_distance(),
-                "profile_points": pts.len(),
+                "profile_points": pts,
                 "mating_note": "make the mate with teeth and mate_teeth swapped; the two axes meet at 90 degrees at the cone apex, apex_distance_mm along each gear's axis from its heel plane",
                 "approximation": "Tredgold's back-cone approximation, the usual way straight bevel teeth are drawn",
             }))
@@ -446,6 +431,72 @@ pub fn build(host: &mut dyn Host, kind: Kind, params: &Value) -> Result<Value, F
             host.progress(1.0, "done");
             Ok(out)
         }
+        Kind::Hypoid => {
+            let h = Hypoid {
+                gear_teeth: int(params, "gear_teeth", 37)?,
+                pinion_teeth: int(params, "pinion_teeth", 11)?,
+                module: num(params, "module", 2.0)?,
+                pressure_angle: num(params, "pressure_angle", 20.0)?,
+                spiral_angle: num(params, "spiral_angle", 30.0)?,
+                offset: num(params, "offset", 8.0)?,
+                backlash: c.backlash,
+                flank_points: c.flank_points,
+                face_width: num(params, "face_width", 0.0)?,
+            };
+            let build_pinion = match params.get("member").and_then(Value::as_str).unwrap_or("gear") {
+                "gear" => false,
+                "pinion" => true,
+                _ => return Err(Failure::Input("member", "must be gear or pinion".into())),
+            };
+            // `hand` is the pinion's; the gear takes the other hand.
+            let pinion_right = match params.get("hand").and_then(Value::as_str).unwrap_or("left") {
+                "right" => true,
+                "left" => false,
+                _ => return Err(Failure::Input("hand", "must be right or left".into())),
+            };
+            let (gear, pinion) = h.members().map_err(profile_err)?;
+            let (m, right) = if build_pinion { (&pinion, pinion_right) } else { (&gear, !pinion_right) };
+            let twist = m.twist.to_degrees() * if right { 1.0 } else { -1.0 };
+            let name = format!(
+                "Hypoid {} z{}:{} m{} E{} {}",
+                if build_pinion { "pinion" } else { "gear" },
+                h.gear_teeth,
+                h.pinion_teeth,
+                h.module,
+                h.offset,
+                if right { "RH" } else { "LH" }
+            );
+            let pts = cone_gear(host, &c, &m.bevel, &name, twist)?;
+            host.progress(1.0, "done");
+            let facts = |mm: &gear::HypoidMember| {
+                json!({
+                    "teeth": mm.bevel.teeth,
+                    "heel_module_mm": mm.bevel.module,
+                    "spiral_angle_deg": mm.spiral.to_degrees(),
+                    "pitch_angle_deg": mm.bevel.pitch_angle().to_degrees(),
+                    "pitch_diameter_mm": 2.0 * mm.bevel.pitch_radius(),
+                    "outside_diameter_mm": 2.0 * (mm.bevel.pitch_radius() + mm.bevel.module * mm.bevel.pitch_angle().cos()),
+                    "cone_distance_mm": mm.bevel.cone_distance(),
+                    "axial_length_mm": mm.bevel.axial_length(),
+                    "apex_distance_mm": mm.bevel.apex_distance(),
+                })
+            };
+            Ok(json!({
+                "body": name,
+                "member": if build_pinion { "pinion" } else { "gear" },
+                "hand": if right { "right" } else { "left" },
+                "twist_deg": twist,
+                "offset_mm": h.offset,
+                "offset_angle_deg": h.offset_angle().to_degrees(),
+                "face_width_mm": m.bevel.face(),
+                "ratio": f64::from(h.gear_teeth) / f64::from(h.pinion_teeth),
+                "gear": facts(&gear),
+                "pinion": facts(&pinion),
+                "profile_points": pts,
+                "mating_note": "run the entry again with the other member and the same inputs; the axes cross at 90 degrees, offset_mm apart, each apex about apex_distance_mm from its heel plane",
+                "approximation": "spiral bevel members sized by first-order hypoid rules (offset angle, pinion spiral angle, enlarged pinion); pitch cones are those of a bevel pair and the flanks are not machine-generated, so expect to tune backlash and placement",
+            }))
+        }
         Kind::Worm => {
             let w = worm(params, &c)?;
             let right = hand(params)?;
@@ -503,6 +554,36 @@ pub fn build(host: &mut dyn Host, kind: Kind, params: &Value) -> Result<Value, F
             }))
         }
     }
+}
+
+/// A cone gear: the heel profile swept towards the apex while it shrinks (and turns by
+/// `twist_deg`, for spiral teeth); then the bore, cut through this body only. Returns the
+/// profile's point count.
+fn cone_gear(host: &mut dyn Host, c: &Common, b: &BevelGear, name: &str, twist_deg: f64) -> Result<usize, Failure> {
+    let pts = b.profile().map_err(profile_err)?;
+    let root = b.pitch_radius() - 1.25 * b.module * b.pitch_angle().cos();
+    // The bore must clear the toe's root too.
+    check_bore(c.bore, root * b.toe_scale())?;
+    let axis = format!("{name} axis");
+    let len = b.axial_length();
+    host.progress(0.1, "sketching heel profile");
+    sketch_profile(host, c.plane, 0.0, name, &pts, 0.0)?;
+    sketch_axis(host, c.plane, &axis, &[("axis".into(), 0.0, len)])?;
+    host.progress(0.4, "sweeping teeth towards the apex");
+    let mut opts = json!({"scale": round(b.toe_scale()).to_string()});
+    if twist_deg != 0.0 {
+        opts["twist"] = json!(deg(twist_deg));
+    }
+    sweep(host, name, &axis, "axis", name, true, opts)?;
+    if c.bore > 0.0 {
+        host.progress(0.8, "boring");
+        let bore = format!("{name} bore");
+        host.run("sketch.create", json!({"plane": c.plane, "name": bore}))?;
+        host.run("sketch.circle.center", json!({"center": [0, 0], "diameter": c.bore}))?;
+        host.run("sketch.finish", json!({}))?;
+        host.run("solid.extrude", json!({"sketch": bore, "distance": round(len), "operation": "cut", "targets": [name]}))?;
+    }
+    Ok(pts.len())
 }
 
 fn worm(params: &Value, c: &Common) -> Result<Worm, Failure> {
@@ -776,6 +857,28 @@ mod tests {
             assert!(build(&mut h, Kind::Rack, &p).is_err(), "{p}");
             assert!(h.0.is_empty(), "{p}");
         }
+    }
+
+    #[test]
+    fn hypoid_members_are_twisted_cone_sweeps_of_opposite_hand() {
+        let mut hg = Fake::default();
+        let g = build(&mut hg, Kind::Hypoid, &json!({"member": "gear", "bore": 10})).unwrap();
+        let mut hp = Fake::default();
+        let p = build(&mut hp, Kind::Hypoid, &json!({"member": "pinion"})).unwrap();
+        for h in [&hg, &hp] {
+            let sweep = h.0.iter().find(|(c, _)| c == "solid.sweep").map(|(_, a)| a).unwrap();
+            assert!(sweep.get("scale").is_some() && sweep.get("twist").is_some());
+        }
+        assert_eq!((g["hand"].clone(), p["hand"].clone()), (json!("right"), json!("left")));
+        assert!(g["twist_deg"].as_f64().unwrap() > 0.0 && p["twist_deg"].as_f64().unwrap() < 0.0);
+        assert_eq!(g["pinion"], p["pinion"]);
+        assert_eq!(names(&hg).last(), Some(&"solid.extrude"), "bore cut");
+        assert!(p["pinion"]["spiral_angle_deg"].as_f64().unwrap() > p["gear"]["spiral_angle_deg"].as_f64().unwrap());
+
+        let mut h = Fake::default();
+        assert!(build(&mut h, Kind::Hypoid, &json!({"member": "both"})).is_err());
+        assert!(build(&mut h, Kind::Hypoid, &json!({"offset": 50})).is_err());
+        assert!(h.0.is_empty());
     }
 }
 

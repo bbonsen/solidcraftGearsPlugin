@@ -41,6 +41,9 @@ fn main() {
         ("rack", "defaults (with 16-tooth pinion)", json!({})),
         ("rack", "500 teeth, pinion bore 8", json!({"teeth": 500, "pinion_teeth": 24, "pinion_bore": 8})),
         ("rack", "bad: pinion bore too big", json!({"pinion_bore": 100})),
+        ("hypoid", "gear, bore 12", json!({"member": "gear", "bore": 12})),
+        ("hypoid", "pinion", json!({"member": "pinion"})),
+        ("hypoid", "bad: offset 40", json!({"offset": 40})),
     ];
     for (entry, label, params) in cases {
         let label = format!("{entry} {label}");
@@ -55,7 +58,7 @@ fn main() {
         println!("   calls ({}): {}", host.calls.len(), summary.join(" -> "));
         match result {
             Ok(v) => {
-                let keep = ["body", "pitch_diameter_mm", "twist_deg", "twist_each_half_deg", "pitch_angle_deg", "apex_distance_mm", "lead_mm", "sections", "centre_distance_mm", "helix_angle_deg"];
+                let keep = ["body", "pitch_diameter_mm", "twist_deg", "twist_each_half_deg", "pitch_angle_deg", "apex_distance_mm", "lead_mm", "sections", "centre_distance_mm", "helix_angle_deg", "hand", "offset_angle_deg"];
                 let short: serde_json::Map<String, Value> = v.as_object().unwrap().iter().filter(|(k, _)| keep.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect();
                 println!("   result: {}", Value::Object(short));
             }

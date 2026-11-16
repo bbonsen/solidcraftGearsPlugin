@@ -364,6 +364,120 @@ impl Worm {
     }
 }
 
+/// A hypoid gear pair for shafts at 90 degrees, offset by `offset` mm, sized by the usual
+/// first-order rules, and built as spiral bevel members:
+///
+/// - offset angle ε in the pitch plane: sin ε = offset / gear pitch radius;
+/// - pinion spiral angle = gear spiral angle + ε, opposite hands;
+/// - both members share the normal module, so the pinion's heel module is
+///   module · cos β2 / cos β1 (it grows with the offset);
+/// - pitch cone angles as for a bevel pair with the same tooth counts.
+///
+/// Each member's teeth are a conical spiral: the heel profile (Tredgold, in the transverse
+/// plane) swept towards the apex while it shrinks and twists, the twist chosen so the teeth
+/// cross the mean cone at the spiral angle. This is not a generated hypoid flank.
+#[derive(Clone, Debug)]
+pub struct Hypoid {
+    pub gear_teeth: u32,
+    pub pinion_teeth: u32,
+    /// The gear's heel transverse module.
+    pub module: f64,
+    /// Normal pressure angle, degrees.
+    pub pressure_angle: f64,
+    /// The gear's spiral angle, degrees.
+    pub spiral_angle: f64,
+    pub offset: f64,
+    /// Normal backlash, mm.
+    pub backlash: f64,
+    pub flank_points: u32,
+    /// Face width along the pitch cone, both members; 0 picks 0.3 × the gear's cone distance.
+    pub face_width: f64,
+}
+
+/// One member of a hypoid pair, ready to build.
+#[derive(Clone, Debug)]
+pub struct HypoidMember {
+    pub bevel: BevelGear,
+    /// Spiral angle, radians.
+    pub spiral: f64,
+    /// Twist from heel to toe for a right-hand member, radians.
+    pub twist: f64,
+}
+
+impl Hypoid {
+    pub fn validate(&self) -> Result<(), (&'static str, String)> {
+        for (f, z) in [("gear_teeth", self.gear_teeth), ("pinion_teeth", self.pinion_teeth)] {
+            if !(MIN_TEETH..=MAX_TEETH).contains(&z) {
+                return Err((f, format!("must be {MIN_TEETH}..={MAX_TEETH}")));
+            }
+        }
+        if self.pinion_teeth > self.gear_teeth {
+            return Err(("pinion_teeth", "must not exceed gear_teeth".into()));
+        }
+        if !(self.spiral_angle.is_finite() && (0.0..=45.0).contains(&self.spiral_angle)) {
+            return Err(("spiral_angle", "must be 0..=45 degrees".into()));
+        }
+        if !(self.module.is_finite() && self.module >= 0.1 && self.module <= 50.0) {
+            return Err(("module", "must be 0.1..=50 mm".into()));
+        }
+        let r2 = self.module * f64::from(self.gear_teeth) / 2.0;
+        if !(self.offset.is_finite() && self.offset >= 0.0 && self.offset <= 0.25 * 2.0 * r2) {
+            return Err(("offset", format!("must be 0..={:.3} mm, a quarter of the gear's pitch diameter", 0.5 * r2)));
+        }
+        if self.pinion_spiral().to_degrees() > 55.0 {
+            return Err(("offset", "makes the pinion's spiral angle over 55 degrees; use a smaller offset or spiral angle".into()));
+        }
+        Ok(())
+    }
+
+    /// Offset angle ε in the pitch plane, radians.
+    pub fn offset_angle(&self) -> f64 {
+        let r2 = self.module * f64::from(self.gear_teeth) / 2.0;
+        (self.offset / r2).clamp(-1.0, 1.0).asin()
+    }
+
+    pub fn pinion_spiral(&self) -> f64 {
+        self.spiral_angle.to_radians() + self.offset_angle()
+    }
+
+    fn member(&self, teeth: u32, mate: u32, spiral: f64, module: f64, face: f64) -> Result<HypoidMember, (&'static str, String)> {
+        let alpha_t = (self.pressure_angle.to_radians().tan() / spiral.cos()).atan().to_degrees();
+        let bevel = BevelGear {
+            teeth,
+            mate_teeth: mate,
+            module,
+            pressure_angle: alpha_t,
+            backlash: self.backlash / spiral.cos(),
+            flank_points: self.flank_points,
+            face_width: face,
+        };
+        bevel.validate()?;
+        let mean_radius = bevel.pitch_radius() * (1.0 - bevel.face() / (2.0 * bevel.cone_distance()));
+        Ok(HypoidMember { twist: bevel.face() * spiral.tan() / mean_radius, spiral, bevel })
+    }
+
+    /// (gear, pinion).
+    pub fn members(&self) -> Result<(HypoidMember, HypoidMember), (&'static str, String)> {
+        self.validate()?;
+        let b2 = self.spiral_angle.to_radians();
+        let b1 = self.pinion_spiral();
+        let m1 = self.module * b2.cos() / b1.cos();
+        let probe = BevelGear {
+            teeth: self.gear_teeth,
+            mate_teeth: self.pinion_teeth,
+            module: self.module,
+            pressure_angle: 20.0,
+            backlash: 0.0,
+            flank_points: self.flank_points,
+            face_width: 0.0,
+        };
+        let face = if self.face_width > 0.0 { self.face_width } else { 0.3 * probe.cone_distance() };
+        let gear = self.member(self.gear_teeth, self.pinion_teeth, b2, self.module, face)?;
+        let pinion = self.member(self.pinion_teeth, self.gear_teeth, b1, m1, face)?;
+        Ok((gear, pinion))
+    }
+}
+
 /// A straight-toothed rack for a spur pinion. The pitch line lies on y = 0 and the teeth point
 /// up (+y), the first starting at x = 0; the bar's back is `back` mm below the root.
 #[derive(Clone, Debug)]
@@ -736,6 +850,59 @@ mod tests {
             Rack { backlash: 2.0, ..rack(1) },
         ] {
             assert!(r.profile().is_err(), "{r:?}");
+        }
+    }
+
+    fn hypoid() -> Hypoid {
+        Hypoid {
+            gear_teeth: 37,
+            pinion_teeth: 11,
+            module: 2.0,
+            pressure_angle: 20.0,
+            spiral_angle: 30.0,
+            offset: 8.0,
+            backlash: 0.0,
+            flank_points: 8,
+            face_width: 0.0,
+        }
+    }
+
+    #[test]
+    fn hypoid_sizing_follows_the_first_order_rules() {
+        let h = hypoid();
+        let (g, p) = h.members().unwrap();
+        let eps = (8.0f64 / 37.0).asin();
+        assert!((p.spiral - g.spiral - eps).abs() < 1e-12);
+        // Same normal module: heel transverse module × cos(spiral) is equal.
+        assert!((g.bevel.module * g.spiral.cos() - p.bevel.module * p.spiral.cos()).abs() < 1e-12);
+        assert!(p.bevel.module > 2.0, "the offset enlarges the pinion");
+        // Pitch cones still complement each other.
+        assert!((g.bevel.pitch_angle() + p.bevel.pitch_angle() - PI / 2.0).abs() < 1e-12);
+        assert_eq!(g.bevel.face(), p.bevel.face());
+        // Twist puts the teeth at the spiral angle on the mean cone.
+        for m in [&g, &p] {
+            let rm = m.bevel.pitch_radius() * (1.0 - m.bevel.face() / (2.0 * m.bevel.cone_distance()));
+            assert!(((m.twist * rm / m.bevel.face()).atan() - m.spiral).abs() < 1e-12);
+            assert!(m.bevel.profile().is_ok());
+        }
+        // No offset gives a spiral bevel pair with equal spiral angles.
+        let (g0, p0) = Hypoid { offset: 0.0, ..hypoid() }.members().unwrap();
+        assert!((g0.spiral - p0.spiral).abs() < 1e-12);
+        assert!((g0.bevel.module - p0.bevel.module).abs() < 1e-12);
+    }
+
+    #[test]
+    fn hypoid_refuses_hostile_input() {
+        for h in [
+            Hypoid { gear_teeth: 3, ..hypoid() },
+            Hypoid { pinion_teeth: 40, ..hypoid() },
+            Hypoid { spiral_angle: 60.0, ..hypoid() },
+            Hypoid { offset: 100.0, ..hypoid() },
+            Hypoid { offset: f64::NAN, ..hypoid() },
+            Hypoid { spiral_angle: 45.0, offset: 18.0, ..hypoid() },
+            Hypoid { face_width: 1000.0, ..hypoid() },
+        ] {
+            assert!(h.members().is_err(), "{h:?}");
         }
     }
 }

@@ -1,6 +1,6 @@
 # Gears: a SolidCraft plugin
 
-Makes involute gears in SolidCraft. It adds seven entries to the Model ribbon. You fill in a
+Makes involute gears in SolidCraft. It adds eight entries to the Model ribbon. You fill in a
 form, and the plugin computes the tooth profile, then builds it with ordinary SolidCraft
 commands:
 
@@ -13,6 +13,7 @@ commands:
 | `worm` | The worm's section square to its axis, swept with one turn per lead; long worms in joined sections |
 | `worm-wheel` | A helical gear that meshes with a `worm` |
 | `rack` | A straight rack, extruded, plus (optionally) a spur pinion extruded in mesh with it |
+| `hypoid` | One member of a hypoid pair: the heel profile swept towards the apex while it shrinks and twists (an approximation, see below) |
 
 The result is ordinary editable sketches, extrudes and sweeps, so you can modify it later. The
 whole run is a single undo step. The plugin needs no file, network or settings access.
@@ -22,10 +23,10 @@ whole run is a single undo step. The plugin needs no file, network or settings a
 ## Install
 
 In SolidCraft (desktop), open **Preferences > Plugins > Install plugin…** and pick
-`gears-0.4.0.zip`. It asks for no permissions. You can also install it from a script:
+`gears-0.5.0.zip`. It asks for no permissions. You can also install it from a script:
 
 ```json
-[{"command":"plugin.install","params":{"path":"gears-0.4.0.zip"}}]
+[{"command":"plugin.install","params":{"path":"gears-0.5.0.zip"}}]
 ```
 
 To upgrade an earlier version by script, add `"replace": true`. In Preferences, remove the old version first if installing over it is refused.
@@ -148,6 +149,45 @@ with its pitch circle touching the pitch line, and turned so one of its tooth ga
 tooth. Each part is its own body. One pinion turn moves the rack π × module × pinion teeth.
 Any spur gear from the `spur` entry with the same module and pressure angle meshes with the rack.
 
+## Hypoid gears (entry `hypoid`, an approximation)
+
+A hypoid pair is a spiral bevel pair whose pinion axis is offset from the gear's, so the shafts
+cross without meeting. This entry builds one member per run; run it twice, with `member` set
+to `gear` and then `pinion` and the other inputs unchanged.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `member` | gear | `gear` (the ring gear) or `pinion` |
+| `gear_teeth` | 37 | Ring gear teeth |
+| `pinion_teeth` | 11 | Pinion teeth (not more than the gear's) |
+| `module` | 2 | The gear's module at the heel |
+| `pressure_angle` | 20 | Normal pressure angle |
+| `spiral_angle` | 30 | The gear's spiral angle, 0–45 degrees |
+| `offset` | 8 | Distance between the axes, mm, up to a quarter of the gear's pitch diameter. 0 gives a spiral bevel pair |
+| `hand` | left | The pinion's hand; the gear takes the other |
+| `face_width` | 0 | Tooth length along the cone, mm. 0 means 0.3 × the gear's cone distance |
+
+`bore`, `backlash` (normal), `plane` and `flank_points` work as for `spur`.
+
+How the pair is sized (the usual first-order rules):
+
+- offset angle ε: sin ε = offset / gear pitch radius
+- pinion spiral angle = gear spiral angle + ε
+- both members share the normal module, so the pinion's heel module is
+  module × cos(gear spiral) / cos(pinion spiral): the offset makes the pinion larger
+- pitch cone angles as for a bevel pair with the same tooth counts
+
+Each member is built like a `bevel` gear, from a Tredgold heel profile in the transverse plane,
+but the sweep also twists. The twist is chosen so the teeth cross the mean cone at the member's
+spiral angle, which makes each tooth a conical spiral.
+
+**This is not a machine-generated hypoid tooth.** In a real hypoid pair the offset also changes
+the pitch cones, and the flanks come from a cutting machine's motion. Here the cones are those
+of a bevel pair and the flanks are spiral sweeps. The parts look right and suit visualisation
+and 3D-printed prototypes with some backlash; they will not run like a cut automotive hypoid.
+Expect to tune backlash and placement. The reply gives both members' pitch angles, cone and apex
+distances to place them: the axes cross at 90°, `offset_mm` apart.
+
 ## Geometry
 
 Spur, helical and herringbone gears have standard full-depth teeth:
@@ -167,7 +207,7 @@ would differ near the root.
 ```bash
 rustup target add wasm32-unknown-unknown
 cargo install wasm-tools
-./build.sh          # tests, builds the component, writes gears-0.4.0.zip
+./build.sh          # tests, builds the component, writes gears-0.5.0.zip
 ```
 
 `host-check/` runs the packaged component inside SolidCraft's real runtime crate
