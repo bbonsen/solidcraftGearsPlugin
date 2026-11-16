@@ -1,6 +1,6 @@
 //! Writes an SVG of a planetary set as the plugin lays it out:
 //! `cargo run --example planetary_svg > planetary.svg`
-use gears::gear::Planetary;
+use gears::gear::{Mods, Planetary};
 
 fn path(pts: &[[f64; 2]]) -> String {
     let mut d = String::new();
@@ -11,7 +11,7 @@ fn path(pts: &[[f64; 2]]) -> String {
 }
 
 fn main() {
-    let p = Planetary { sun_teeth: 12, planet_teeth: 18, planets: 3, module: 2.0, pressure_angle: 20.0, backlash: 0.05, flank_points: 8, rim: 6.0 };
+    let p = Planetary { sun_teeth: 12, planet_teeth: 18, planets: 3, module: 2.0, pressure_angle: 20.0, backlash: 0.05, flank_points: 8, rim: 6.0, mods: Mods::default() };
     let ((sun, _), planets, (ring, _)) = p.layout().expect("valid set");
     let r = p.ring().outer_radius();
     let v = r + 2.0;

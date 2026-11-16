@@ -18,6 +18,43 @@ pub struct SpurGear {
     pub backlash: f64,
     /// Points along each flank (more = smoother, slower).
     pub flank_points: u32,
+    /// Profile shift, root fillet and tip relief.
+    pub mods: Mods,
+}
+
+/// Tooth profile modifications for involute gears. All zero is the standard tooth.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Mods {
+    /// Profile shift coefficient x (normal): the tooth moves out by x × module.
+    pub shift: f64,
+    /// Root fillet radius as a multiple of the (normal) module; 0 leaves a sharp corner.
+    pub root_fillet: f64,
+    /// Material removed from each flank at the tip, mm.
+    pub tip_relief: f64,
+    /// How far down from the tip the relief starts, as a fraction of the addendum; 0 means 0.5.
+    pub relief_length: f64,
+}
+
+impl Mods {
+    pub fn validate(&self, module: f64) -> Result<(), (&'static str, String)> {
+        if !(self.shift.is_finite() && (-0.6..=1.2).contains(&self.shift)) {
+            return Err(("profile_shift", "must be -0.6..=1.2".into()));
+        }
+        if !(self.root_fillet.is_finite() && (0.0..=0.6).contains(&self.root_fillet)) {
+            return Err(("root_fillet", "must be 0..=0.6 (× module)".into()));
+        }
+        if !(self.tip_relief.is_finite() && self.tip_relief >= 0.0 && self.tip_relief <= 0.2 * module) {
+            return Err(("tip_relief", format!("must be 0..={:.3} mm (0.2 × module)", 0.2 * module)));
+        }
+        if !(self.relief_length.is_finite() && (0.0..=1.0).contains(&self.relief_length)) {
+            return Err(("relief_length", "must be 0..=1 (fraction of the addendum; 0 means 0.5)".into()));
+        }
+        Ok(())
+    }
+
+    fn relief_fraction(&self) -> f64 {
+        if self.relief_length > 0.0 { self.relief_length } else { 0.5 }
+    }
 }
 
 /// Key circles of the gear, all radii in mm.
@@ -56,7 +93,7 @@ impl SpurGear {
         if !(2..=40).contains(&self.flank_points) {
             return Err(("flank_points", "must be 2..=40".into()));
         }
-        Ok(())
+        self.mods.validate(self.module)
     }
 
     fn cos_helix(&self) -> f64 {
@@ -83,14 +120,35 @@ impl SpurGear {
         Circles {
             pitch,
             base: pitch * self.transverse_pressure_angle().cos(),
-            tip: pitch + self.module,
-            root: pitch - 1.25 * self.module,
+            tip: pitch + self.module * (1.0 + self.mods.shift),
+            root: pitch - self.module * (1.25 - self.mods.shift),
         }
     }
 
-    /// Fewest teeth that avoid undercut (2·cosβ / sin²αt; 2 / sin²α for a spur gear).
+    /// Fewest teeth that avoid undercut at this profile shift: 2·cosβ·(1 − x) / sin²αt
+    /// (2 / sin²α for an unshifted spur gear).
     pub fn min_teeth_without_undercut(&self) -> f64 {
-        2.0 * self.cos_helix() / self.transverse_pressure_angle().sin().powi(2)
+        2.0 * self.cos_helix() * (1.0 - self.mods.shift) / self.transverse_pressure_angle().sin().powi(2)
+    }
+
+    /// The profile shift that just avoids undercut for this tooth count.
+    pub fn shift_to_avoid_undercut(&self) -> f64 {
+        1.0 - f64::from(self.teeth) * self.transverse_pressure_angle().sin().powi(2) / (2.0 * self.cos_helix())
+    }
+
+    /// Operating centre distance with a mate of `teeth` and profile shift `shift` (same module,
+    /// pressure angle and helix): solves inv αw = inv αt + 2·tanαn·(x1 + x2) / (z1 + z2).
+    pub fn centre_distance_with(&self, teeth: u32, shift: f64) -> f64 {
+        let at = self.transverse_pressure_angle();
+        let z = f64::from(self.teeth + teeth);
+        let target = inv(at) + 2.0 * self.pressure_angle.to_radians().tan() * (self.mods.shift + shift) / z;
+        // inv is increasing on (0, π/2): bisect.
+        let (mut lo, mut hi) = (1e-6, PI / 2.0 - 1e-6);
+        for _ in 0..200 {
+            let mid = (lo + hi) / 2.0;
+            if inv(mid) < target { lo = mid } else { hi = mid }
+        }
+        self.transverse_module() * z / 2.0 * at.cos() / lo.cos()
     }
 
     /// Closed profile, counter-clockwise, gear centred on the origin with tooth 0 on +X.
@@ -99,8 +157,35 @@ impl SpurGear {
         self.validate()?;
         let c = self.circles();
         let backlash = self.backlash / self.cos_helix();
-        let half_pitch = (PI * self.transverse_module() / 2.0 - backlash) / (2.0 * c.pitch);
-        let flank = involute_flank(&c, self.transverse_pressure_angle(), half_pitch, self.flank_points as usize)?;
+        // Transverse thickness at the pitch circle: mt·(π/2 + 2x·tanαn), less backlash.
+        let shift_gain = 2.0 * self.mods.shift * self.pressure_angle.to_radians().tan() * self.transverse_module();
+        let half_pitch = (PI * self.transverse_module() / 2.0 + shift_gain - backlash) / (2.0 * c.pitch);
+        let alpha = self.transverse_pressure_angle();
+        let n = self.flank_points as usize;
+        let mut radii = flank_radii(&c, n);
+        // Tip relief starts at an exact radius, with extra points over its length.
+        let relief_start = c.tip - self.mods.relief_fraction() * (c.tip - c.pitch);
+        if self.mods.tip_relief > 0.0 {
+            let start = relief_start.max(c.root.max(c.base));
+            radii.extend((0..4).map(|i| start + (c.tip - start) * f64::from(i) / 4.0));
+            radii.sort_by(f64::total_cmp);
+            radii.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+        }
+        let mut flank = involute_flank_radii(&c, alpha, half_pitch, &radii)?;
+        if self.mods.tip_relief > 0.0 {
+            let start = relief_start.max(c.root.max(c.base));
+            for (r, psi) in flank.iter_mut() {
+                if *r > start {
+                    *psi -= self.mods.tip_relief * (*r - start) / (c.tip - start) / *r;
+                }
+            }
+            if flank.last().is_some_and(|f| f.1 <= 0.0) {
+                return Err(("tip_relief", "removes the whole tip; use less relief".into()));
+            }
+        }
+        if self.mods.root_fillet > 0.0 {
+            flank = root_fillet(&flank, c.root, self.mods.root_fillet * self.module, f64::from(self.teeth))?;
+        }
         assemble(self.teeth, &flank, 0.0)
     }
 }
@@ -113,23 +198,92 @@ pub type Flank = Vec<(f64, f64)>;
 /// the tooth's angular thickness at the pitch circle `half_pitch`. Below the base circle the
 /// flank runs radially to the root.
 pub fn involute_flank(c: &Circles, alpha: f64, half_pitch: f64, n: usize) -> Result<Flank, (&'static str, String)> {
+    involute_flank_radii(c, alpha, half_pitch, &flank_radii(c, n))
+}
+
+/// The radii `involute_flank` samples: `n` from the larger of root and base up to the tip,
+/// closer together near the base where the involute curves most.
+pub fn flank_radii(c: &Circles, n: usize) -> Vec<f64> {
+    let start = c.root.max(c.base);
+    (0..n)
+        .map(|i| {
+            let t = i as f64 / (n - 1) as f64;
+            start + (c.tip - start) * t * t
+        })
+        .collect()
+}
+
+/// An involute flank at the given radii (each at least the base circle and rising), with a
+/// radial segment from the root when the root lies inside the base circle.
+pub fn involute_flank_radii(c: &Circles, alpha: f64, half_pitch: f64, radii: &[f64]) -> Result<Flank, (&'static str, String)> {
     let psi_base = half_pitch + inv(alpha);
     let psi = |r: f64| psi_base - inv((c.base / r).clamp(-1.0, 1.0).acos());
     if psi(c.tip) <= 0.0 {
-        return Err(("teeth", "teeth come to a point at the tip circle; use more teeth or a smaller pressure angle".into()));
+        return Err(("teeth", "teeth come to a point at the tip circle; use more teeth, less profile shift or a smaller pressure angle".into()));
     }
-    let mut flank = Vec::with_capacity(n + 1);
+    let mut flank = Vec::with_capacity(radii.len() + 1);
     if c.root < c.base {
         flank.push((c.root, psi_base));
     }
-    let start = c.root.max(c.base);
-    for i in 0..n {
-        let t = i as f64 / (n - 1) as f64;
-        // Cluster points near the base where curvature is highest.
-        let r = start + (c.tip - start) * t * t;
-        flank.push((r, psi(r)));
-    }
+    flank.extend(radii.iter().map(|&r| (r, psi(r))));
     Ok(flank)
+}
+
+/// Replaces a flank's sharp root corner with an arc of radius `rho` tangent to the flank and
+/// to the root circle. `teeth` bounds the room in the tooth space.
+pub fn root_fillet(flank: &[(f64, f64)], root: f64, rho: f64, teeth: f64) -> Result<Flank, (&'static str, String)> {
+    let xy = |(r, p): (f64, f64)| [r * p.cos(), r * p.sin()];
+    let too_big = || ("root_fillet", "the root fillet does not fit; use a smaller one".to_string());
+    for i in 0..flank.len().saturating_sub(1).min(8) {
+        let (a, b) = (xy(flank[i]), xy(flank[i + 1]));
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        let len = dx.hypot(dy);
+        if len < 1e-12 {
+            continue;
+        }
+        // Unit normal pointing into the tooth space (larger angle).
+        let n = [-dy / len, dx / len];
+        let d0 = n[0] * a[0] + n[1] * a[1];
+        // Centre C: |C| = root + ρ and n·C = d0 + ρ.
+        let k = (d0 + rho) / (root + rho);
+        if !(-1.0..=1.0).contains(&k) {
+            return Err(too_big());
+        }
+        let theta = n[1].atan2(n[0]) - k.acos();
+        let centre = [(root + rho) * theta.cos(), (root + rho) * theta.sin()];
+        let t_line = [centre[0] - rho * n[0], centre[1] - rho * n[1]];
+        let u = ((t_line[0] - a[0]) * dx + (t_line[1] - a[1]) * dy) / (len * len);
+        if !(0.0..=1.0).contains(&u) {
+            continue;
+        }
+        if theta >= PI / teeth - 1e-6 {
+            return Err(too_big());
+        }
+        // Arc from the root circle's tangent point up to the flank's.
+        // The root circle's tangent point lies straight in from the centre.
+        let a0 = theta + PI;
+        let a1 = (t_line[1] - centre[1]).atan2(t_line[0] - centre[0]);
+        let mut sweep = a1 - a0;
+        while sweep > PI {
+            sweep -= 2.0 * PI;
+        }
+        while sweep < -PI {
+            sweep += 2.0 * PI;
+        }
+        let steps = 6;
+        let mut out: Flank = (0..steps)
+            .map(|j| {
+                let a = a0 + sweep * f64::from(j) / f64::from(steps);
+                let p = [centre[0] + rho * a.cos(), centre[1] + rho * a.sin()];
+                (p[0].hypot(p[1]), p[1].atan2(p[0]))
+            })
+            .collect();
+        let r_t = t_line[0].hypot(t_line[1]);
+        out.push((r_t, t_line[1].atan2(t_line[0])));
+        out.extend(flank.iter().copied().filter(|f| f.0 > r_t + 1e-9));
+        return Ok(out);
+    }
+    Err(too_big())
 }
 
 /// Points on an arc land strictly between angles `a0` and `a1` at radius `r`: at least two, and
@@ -193,6 +347,7 @@ impl BevelGear {
             helix_angle: 0.0,
             backlash: self.backlash,
             flank_points: self.flank_points,
+            mods: Mods::default(),
         }
     }
 
@@ -360,6 +515,7 @@ impl Worm {
             helix_angle: g.to_degrees(),
             backlash: self.backlash * g.cos(),
             flank_points: self.flank_points,
+            mods: Mods::default(),
         }
     }
 }
@@ -562,6 +718,9 @@ pub struct Planetary {
     pub backlash: f64,
     pub flank_points: u32,
     pub rim: f64,
+    /// Root fillet and tip relief for the sun and planets. Profile shift must stay 0: the
+    /// planets' placement assumes standard centre distances.
+    pub mods: Mods,
 }
 
 /// A part's outline, placed: points in the sketch plane and its centre.
@@ -585,6 +744,7 @@ impl Planetary {
             helix_angle: 0.0,
             backlash: self.backlash,
             flank_points: self.flank_points,
+            mods: self.mods.clone(),
         }
     }
 
@@ -615,6 +775,9 @@ impl Planetary {
         self.ring().validate().map_err(|(f, r)| if f == "teeth" { ("planet_teeth", format!("ring: {r}")) } else { (f, r) })?;
         if !(2..=12).contains(&self.planets) {
             return Err(("planets", "must be 2..=12".into()));
+        }
+        if self.mods.shift != 0.0 {
+            return Err(("profile_shift", "must be 0 in a planetary set".into()));
         }
         if (self.sun_teeth + self.ring_teeth()) % self.planets != 0 {
             return Err((
@@ -926,6 +1089,12 @@ impl Rack {
 
     /// The spur pinion that meshes with this rack.
     pub fn pinion(&self, teeth: u32, flank_points: u32) -> SpurGear {
+        self.pinion_with(teeth, flank_points, Mods::default())
+    }
+
+    /// The pinion with profile modifications. A shifted pinion sits x × module further from the
+    /// rack's pitch line (see `pinion_in_mesh`).
+    pub fn pinion_with(&self, teeth: u32, flank_points: u32, mods: Mods) -> SpurGear {
         SpurGear {
             teeth,
             module: self.module,
@@ -933,6 +1102,7 @@ impl Rack {
             helix_angle: 0.0,
             backlash: self.backlash,
             flank_points,
+            mods,
         }
     }
 
@@ -940,7 +1110,8 @@ impl Rack {
     /// radius), turned so a tooth gap straddles that rack tooth. Returns (points, centre).
     pub fn pinion_in_mesh(&self, pinion: &SpurGear, i: u32) -> Result<(Vec<[f64; 2]>, [f64; 2]), (&'static str, String)> {
         let pts = pinion.profile()?;
-        let centre = [self.tooth_centre(i), pinion.circles().pitch];
+        // A shifted pinion's reference circle sits x × module above the pitch line.
+        let centre = [self.tooth_centre(i), pinion.circles().pitch + pinion.mods.shift * pinion.module];
         // The profile's tooth 0 is on +x, so a gap is centred at π/z; turn it to point down.
         let rot = -PI / 2.0 - PI / f64::from(pinion.teeth);
         let (sin, cos) = rot.sin_cos();
@@ -954,7 +1125,7 @@ mod tests {
     use super::*;
 
     fn gear(teeth: u32) -> SpurGear {
-        SpurGear { teeth, module: 2.0, pressure_angle: 20.0, helix_angle: 0.0, backlash: 0.0, flank_points: 8 }
+        SpurGear { teeth, module: 2.0, pressure_angle: 20.0, helix_angle: 0.0, backlash: 0.0, flank_points: 8, mods: Mods::default() }
     }
 
     fn polar(p: [f64; 2]) -> (f64, f64) {
@@ -1317,7 +1488,7 @@ mod tests {
         let g = InternalGear { backlash: 0.05, ..ring(60) };
         let ring_pts = g.profile(0.0).unwrap();
         for z in [18, 24, 40] {
-            let pin = SpurGear { teeth: z, module: 2.0, pressure_angle: 20.0, helix_angle: 0.0, backlash: 0.05, flank_points: 12 };
+            let pin = SpurGear { teeth: z, module: 2.0, pressure_angle: 20.0, helix_angle: 0.0, backlash: 0.05, flank_points: 12, mods: Mods::default() };
             // Pinion centred inside, touching the ring's pitch circle on +x, with a tooth pointing
             // at the ring's space... the ring has a tooth on +x, so the pinion puts a gap there.
             let cx = g.circles().pitch - pin.circles().pitch;
@@ -1369,7 +1540,7 @@ mod tests {
     }
 
     fn planetary(zs: u32, zp: u32, n: u32) -> Planetary {
-        Planetary { sun_teeth: zs, planet_teeth: zp, planets: n, module: 2.0, pressure_angle: 20.0, backlash: 0.05, flank_points: 12, rim: 5.0 }
+        Planetary { sun_teeth: zs, planet_teeth: zp, planets: n, module: 2.0, pressure_angle: 20.0, backlash: 0.05, flank_points: 12, rim: 5.0, mods: Mods::default() }
     }
 
     #[test]
@@ -1549,6 +1720,146 @@ mod tests {
         ] {
             assert!(d.disc().is_err(), "{d:?}");
         }
+    }
+
+    fn modded(z: u32, mods: Mods) -> SpurGear {
+        SpurGear { flank_points: 12, mods, ..gear(z) }
+    }
+
+    fn circumradius(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> f64 {
+        let (ab, bc, ca) = ((a[0] - b[0]).hypot(a[1] - b[1]), (b[0] - c[0]).hypot(b[1] - c[1]), (c[0] - a[0]).hypot(c[1] - a[1]));
+        let area2 = ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])).abs();
+        ab * bc * ca / (2.0 * area2)
+    }
+
+    #[test]
+    fn profile_shift_moves_the_tooth_out_and_thickens_it() {
+        let x = 0.4;
+        let g = modded(12, Mods { shift: x, ..Mods::default() });
+        let c = g.circles();
+        assert!((c.tip - (12.0 + 2.0 * 1.4)).abs() < 1e-12);
+        assert!((c.root - (12.0 - 2.0 * 0.85)).abs() < 1e-12);
+        // Thickness at the pitch circle: m(π/2 + 2x·tanα).
+        let a = 20f64.to_radians();
+        let psi_base = (PI * 2.0 / 2.0 + 2.0 * x * a.tan() * 2.0) / (2.0 * 12.0) + inv(a);
+        let arc = 2.0 * (psi_base - inv((c.base / c.pitch).acos())) * c.pitch;
+        assert!((arc - 2.0 * (PI / 2.0 + 2.0 * x * a.tan())).abs() < 1e-9);
+        simple_ccw(&g.profile().unwrap(), c.root, c.tip);
+        // Undercut: 12 teeth needs about x = 0.3 at 20°.
+        let need = gear(12).shift_to_avoid_undercut();
+        assert!((need - (1.0 - 12.0 * a.sin().powi(2) / 2.0)).abs() < 1e-12);
+        assert!(f64::from(12) >= modded(12, Mods { shift: need, ..Mods::default() }).min_teeth_without_undercut() - 1e-9);
+        // Centre distance: unchanged when the shifts cancel, larger when they add.
+        assert!((gear(12).centre_distance_with(24, 0.0) - 36.0).abs() < 1e-9);
+        assert!((modded(12, Mods { shift: 0.3, ..Mods::default() }).centre_distance_with(24, -0.3) - 36.0).abs() < 1e-9);
+        let aw = modded(12, Mods { shift: 0.3, ..Mods::default() }).centre_distance_with(24, 0.0);
+        let alpha_w = (36.0 * a.cos() / aw).acos();
+        assert!((inv(alpha_w) - (inv(a) + 2.0 * a.tan() * 0.3 / 36.0)).abs() < 1e-12);
+        assert!(aw > 36.0);
+        // Too much shift points the teeth.
+        assert!(modded(8, Mods { shift: 1.2, ..Mods::default() }).profile().is_err());
+    }
+
+    #[test]
+    fn root_fillet_is_a_tangent_arc_of_the_given_radius() {
+        for (z, rho_m) in [(12, 0.38), (20, 0.38), (40, 0.25), (80, 0.38)] {
+            let g = modded(z, Mods { root_fillet: rho_m, ..Mods::default() });
+            let c = g.circles();
+            let pts = g.profile().unwrap();
+            simple_ccw(&pts, c.root, c.tip);
+            // The first points of tooth 0 are the fillet: on the root circle, then an arc of radius ρ.
+            assert!((polar(pts[0]).0 - c.root).abs() < 1e-9, "z={z}");
+            let rho = rho_m * 2.0;
+            for k in 0..4 {
+                let r = circumradius(pts[k], pts[k + 1], pts[k + 2]);
+                assert!((r - rho).abs() < 1e-6, "z={z}: arc radius {r} vs {rho}");
+            }
+            // The fillet moves the root point into the tooth space (further from tooth 0's centre
+            // at angle 0), shortening the root land.
+            let sharp = gear(z).profile().unwrap();
+            assert!(pts[0][1].atan2(pts[0][0]) < sharp[0][1].atan2(sharp[0][0]), "z={z}");
+        }
+        // The 0.6 × module cap fits standard gaps; the fit check itself refuses a fillet wider
+        // than the space.
+        let g = gear(20);
+        let c = g.circles();
+        let flank = involute_flank(&c, 20f64.to_radians(), PI / 40.0, 8).unwrap();
+        assert!(root_fillet(&flank, c.root, 0.76, 20.0).is_ok());
+        assert_eq!(root_fillet(&flank, c.root, 6.0, 20.0).unwrap_err().0, "root_fillet");
+    }
+
+    #[test]
+    fn tip_relief_thins_only_the_top_of_the_flank() {
+        let plain = modded(30, Mods::default());
+        let g = modded(30, Mods { tip_relief: 0.04, relief_length: 0.5, ..Mods::default() });
+        let (p0, p1) = (plain.profile().unwrap(), g.profile().unwrap());
+        let c = g.circles();
+        let start = c.tip - 0.5 * (c.tip - c.pitch);
+        // Points below the start match the unrelieved flank exactly.
+        let below = |pts: &[[f64; 2]]| pts.iter().take(14).filter(|p| polar(**p).0 < start - 1e-6).count();
+        assert_eq!(below(&p0), below(&p1));
+        for k in 0..below(&p1) {
+            assert!((p0[k][0] - p1[k][0]).abs() < 1e-12 && (p0[k][1] - p1[k][1]).abs() < 1e-12);
+        }
+        // At the tip each flank has lost 0.04 mm of arc.
+        let tip_half = |pts: &[[f64; 2]]| {
+            pts.iter().take(30).filter(|p| (polar(**p).0 - c.tip).abs() < 1e-9).map(|p| p[1].atan2(p[0])).fold(f64::MAX, f64::min).abs()
+        };
+        assert!(((tip_half(&p0) - tip_half(&p1)) * c.tip - 0.04).abs() < 1e-9);
+        // More than 0.2 × module is refused.
+        assert_eq!(modded(30, Mods { tip_relief: 0.5, ..Mods::default() }).profile().unwrap_err().0, "tip_relief");
+    }
+
+    #[test]
+    fn modified_pinions_still_mesh_with_the_rack() {
+        let r = Rack { backlash: 0.02, ..rack(10) };
+        let rack_pts = r.profile().unwrap();
+        for mods in [
+            Mods { shift: 0.5, ..Mods::default() },
+            Mods { root_fillet: 0.38, tip_relief: 0.06, ..Mods::default() },
+            Mods { shift: 0.3, root_fillet: 0.3, tip_relief: 0.04, relief_length: 0.6 },
+        ] {
+            for z in [10, 14, 24] {
+                let g = r.pinion_with(z, 12, mods.clone());
+                let (pts, cen) = r.pinion_in_mesh(&g, 5).unwrap();
+                assert!((cen[1] - (g.circles().pitch + mods.shift * 2.0)).abs() < 1e-12);
+                for &p in &pts {
+                    assert!(!inside_poly(&rack_pts, p), "z={z} {mods:?}: pinion point in the rack");
+                }
+                for &p in &rack_pts {
+                    assert!(!inside_poly(&pts, p), "z={z} {mods:?}: rack point in the pinion");
+                }
+                assert!(pts.iter().any(|p| p[1] < 2.0 - 0.5), "z={z} {mods:?}: not engaged");
+            }
+        }
+    }
+
+    #[test]
+    fn mods_refuse_hostile_values() {
+        for m in [
+            Mods { shift: 5.0, ..Mods::default() },
+            Mods { shift: f64::NAN, ..Mods::default() },
+            Mods { root_fillet: -0.1, ..Mods::default() },
+            Mods { tip_relief: 10.0, ..Mods::default() },
+            Mods { relief_length: 2.0, ..Mods::default() },
+        ] {
+            assert!(modded(20, m.clone()).profile().is_err(), "{m:?}");
+        }
+    }
+
+    #[test]
+    fn filleted_relieved_planetary_still_meshes() {
+        let p = Planetary { mods: Mods { root_fillet: 0.38, tip_relief: 0.05, ..Mods::default() }, ..planetary(12, 18, 3) };
+        let ((sun, _), planets, (ring, _)) = p.layout().unwrap();
+        for (pl, _) in &planets {
+            for &q in pl {
+                assert!(!inside_poly(&sun, q) && inside_poly(&ring, q));
+            }
+            for &q in sun.iter().chain(&ring) {
+                assert!(!inside_poly(pl, q));
+            }
+        }
+        assert_eq!(Planetary { mods: Mods { shift: 0.2, ..Mods::default() }, ..planetary(12, 18, 3) }.layout().unwrap_err().0, "profile_shift");
     }
 }
 

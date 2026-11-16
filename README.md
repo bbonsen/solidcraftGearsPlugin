@@ -27,10 +27,10 @@ whole run is a single undo step. The plugin needs no file, network or settings a
 ## Install
 
 In SolidCraft (desktop), open **Preferences > Plugins > Install plugin…** and pick
-`gears-0.8.0.zip`. It asks for no permissions. You can also install it from a script:
+`gears-0.9.0.zip`. It asks for no permissions. You can also install it from a script:
 
 ```json
-[{"command":"plugin.install","params":{"path":"gears-0.8.0.zip"}}]
+[{"command":"plugin.install","params":{"path":"gears-0.9.0.zip"}}]
 ```
 
 To upgrade an earlier version by script, add `"replace": true`. In Preferences, remove the old version first if installing over it is refused.
@@ -50,6 +50,38 @@ To upgrade an earlier version by script, add `"replace": true`. In Preferences, 
 
 The plugin returns the pitch, tip, root and base diameters. Two gears with the same module
 and pressure angle mesh when their centres are **(z1 + z2) × module / 2** apart.
+
+## Tooth modifications
+
+![Profile shift, root fillet and tip relief against the standard tooth (dashed)](preview-mods.png)
+
+| Field | Default | Meaning | Entries |
+|---|---|---|---|
+| `profile_shift` | 0 | Profile shift coefficient x, −0.6 to 1.2 | `spur`, `helical`, `herringbone`, `rack` (pinion) |
+| `root_fillet` | 0 | Root fillet radius as a multiple of the module, 0–0.6; 0.38 is the standard rack's | those, and `planetary` (sun and planets) |
+| `tip_relief` | 0 | Material removed from each flank at the tip, mm, up to 0.2 × module | same as `root_fillet` |
+| `relief_length` | 0.5 | Where the relief starts, as a fraction of the addendum down from the tip. Not on the forms; scripts can set it | same as `root_fillet` |
+| `crowning` | 0 | Material removed from each flank at both faces, mm, up to 0.1 × module | `spur` |
+
+- **Profile shift** moves the tooth outward by x × module. Tip and root move out by that much,
+  and the tooth thickens at the pitch circle by 2·x·module·tan α. A positive shift strengthens
+  a small pinion's root and avoids undercut: when a gear has too few teeth, the reply's warning
+  gives the shift that cures it (about 0.41 for 10 teeth at 20°). On helical gears the shift is
+  in the normal plane. A mate shifted the opposite way (x2 = −x1) keeps the standard centre
+  distance. Otherwise the gears sit further apart, at the operating distance from
+  inv αw = inv α + 2·tan α·(x1 + x2)/(z1 + z2); the reply gives the formula. The `rack` entry
+  moves a shifted pinion out by x × module so it stays in mesh. Planetary sets have no shift
+  input, because placing the planets relies on standard centre distances.
+- **Root fillet** replaces the sharp corner where the flank meets the root circle with an arc of
+  that radius, tangent to both. It is refused if it does not fit the tooth space.
+- **Tip relief** thins each flank linearly, from nothing at the start radius to `tip_relief` at
+  the tip, so the teeth go in and out of mesh more smoothly under load.
+- **Crowning** thins each tooth toward both faces along a parabola, to nothing at mid-width, so
+  a slightly misaligned pair still bears in the middle. The tooth then varies along the face, so
+  a crowned spur is a loft through 7 sections (`solid.loft`) instead of an extrude. Crowning is
+  only available on straight-toothed spur gears.
+
+Internal, bevel, hypoid, worm and cycloidal entries do not take these modifications.
 
 ## Extra inputs (entry `helical`)
 
@@ -315,7 +347,7 @@ would differ near the root.
 ```bash
 rustup target add wasm32-unknown-unknown
 cargo install wasm-tools
-./build.sh          # tests, builds the component, writes gears-0.8.0.zip
+./build.sh          # tests, builds the component, writes gears-0.9.0.zip
 ```
 
 `host-check/` runs the packaged component inside SolidCraft's real runtime crate
@@ -346,7 +378,8 @@ MIT OR Apache-2.0).
 ## Status
 
 The plugin has been tested in SolidCraft's plugin runtime with a host that records each
-command call, not yet in the SolidCraft app. Sweeping a profile with hundreds of segments,
+command call, not yet in the SolidCraft app. A crowned spur's loft through 7 sections of
+hundreds of segments each is also untested in the app. Sweeping a profile with hundreds of segments,
 with a twist or a scale, is the heaviest step. If it is slow or fails, lower `flank_points`.
 The joins between worm sections and between herringbone halves meet face to face, which is the
 case most likely to trouble a CAD kernel; if one fails, send the error.

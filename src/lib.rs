@@ -4,7 +4,7 @@
 
 pub mod gear;
 
-use gear::{BevelGear, CycloidalDrive, CycloidalGear, Hypoid, InternalGear, Planetary, Rack, SpurGear, Worm};
+use gear::{BevelGear, CycloidalDrive, CycloidalGear, Hypoid, InternalGear, Mods, Planetary, Rack, SpurGear, Worm};
 use serde_json::{json, Value};
 use std::f64::consts::PI;
 
@@ -211,6 +211,16 @@ fn deg(x: f64) -> String {
     format!("{x:.6} deg")
 }
 
+/// Tooth modifications from the entry's inputs.
+fn mods(params: &Value) -> Result<Mods, Failure> {
+    Ok(Mods {
+        shift: num(params, "profile_shift", 0.0)?,
+        root_fillet: num(params, "root_fillet", 0.0)?,
+        tip_relief: num(params, "tip_relief", 0.0)?,
+        relief_length: num(params, "relief_length", 0.0)?,
+    })
+}
+
 fn cylindrical_gear(params: &Value, c: &Common, helix_angle: f64) -> Result<SpurGear, Failure> {
     Ok(SpurGear {
         teeth: int(params, "teeth", 20)?,
@@ -219,6 +229,7 @@ fn cylindrical_gear(params: &Value, c: &Common, helix_angle: f64) -> Result<Spur
         helix_angle,
         backlash: c.backlash,
         flank_points: c.flank_points,
+        mods: mods(params)?,
     })
 }
 
@@ -246,9 +257,24 @@ fn describe(g: &SpurGear, name: &str) -> Value {
         "base_diameter_mm": 2.0 * c.base,
         "centre_distance_note": "two meshing gears sit (z1 + z2) * transverse module / 2 apart",
         "warnings": if undercut {
-            vec![format!("{} teeth is below {:.1}: a real cut gear would be undercut; this profile is not", g.teeth, g.min_teeth_without_undercut())]
+            vec![format!(
+                "{} teeth is below {:.1}: a real cut gear would be undercut; this profile is not. A profile shift of {:.3} avoids it",
+                g.teeth,
+                g.min_teeth_without_undercut(),
+                g.shift_to_avoid_undercut()
+            )]
         } else { vec![] },
     });
+    if g.mods != Mods::default() {
+        out["profile_shift"] = json!(g.mods.shift);
+        out["root_fillet_mm"] = json!(g.mods.root_fillet * g.module);
+        out["tip_relief_mm"] = json!(g.mods.tip_relief);
+    }
+    if g.mods.shift != 0.0 {
+        out["centre_distance_note"] = json!(
+            "with profile shift, a mate whose shift is the opposite (x2 = -x1) keeps the standard centre distance (z1 + z2) * transverse module / 2; otherwise the gears sit further apart: inv(aw) = inv(at) + 2 tan(an) (x1 + x2) / (z1 + z2), a = a0 cos(at) / cos(aw)"
+        );
+    }
     if g.helix_angle > 0.0 {
         out["helix_angle_deg"] = json!(g.helix_angle);
         out["transverse_module_mm"] = json!(g.transverse_module());
@@ -256,6 +282,15 @@ fn describe(g: &SpurGear, name: &str) -> Value {
         out["lead_mm"] = json!(PI * 2.0 * c.pitch / g.helix_angle.to_radians().tan());
     }
     out
+}
+
+/// Sections in a crowned spur's loft (ends, mid-width and between).
+const CROWN_SECTIONS: usize = 7;
+
+/// Extra thinning of a crowned tooth (total, both flanks) at height `z` of face width `b`.
+fn crown_thinning(c: f64, z: f64, b: f64) -> f64 {
+    let t = 2.0 * z / b - 1.0;
+    2.0 * c * t * t
 }
 
 /// Build a gear. `params` is the entry's JSON input.
@@ -286,7 +321,12 @@ pub fn build(host: &mut dyn Host, kind: Kind, params: &Value) -> Result<Value, F
                 (cylindrical_gear(params, &c, 0.0)?, true, json!({}))
             };
             let thickness = length(params, "thickness", 10.0)?;
-            let pts = g.profile().map_err(profile_err)?;
+            let crown0 = if kind == Kind::Spur { num(params, "crowning", 0.0)? } else { 0.0 };
+            if !(crown0.is_finite() && crown0 >= 0.0 && crown0 <= 0.1 * g.module) {
+                return Err(Failure::Input("crowning", format!("must be 0..={:.3} mm (0.1 × module)", 0.1 * g.module)));
+            }
+            let first = SpurGear { backlash: g.backlash + crown_thinning(crown0, 0.0, thickness), ..g.clone() };
+            let pts = first.profile().map_err(profile_err)?;
             check_bore(c.bore, g.circles().root)?;
             let name = match kind {
                 Kind::Spur => format!("Spur gear z{} m{}", g.teeth, g.module),
@@ -296,7 +336,26 @@ pub fn build(host: &mut dyn Host, kind: Kind, params: &Value) -> Result<Value, F
             host.progress(0.1, "sketching profile");
             sketch_profile(host, c.plane, 0.0, &name, &pts, c.bore)?;
             let mut out = describe(&g, &name);
-            if kind == Kind::Spur {
+            let crowning = crown0;
+            if kind == Kind::Spur && crowning > 0.0 {
+                // Crowned teeth vary along the face: loft through sections whose teeth are thinned
+                // by 2·c·(2z/b − 1)², c at each face, nothing at mid-width.
+                let mut sections = vec![json!({"sketch": name})];
+                for k in 1..CROWN_SECTIONS {
+                    if host.cancelled() {
+                        return Err(Failure::Cancelled);
+                    }
+                    let z = thickness * k as f64 / (CROWN_SECTIONS - 1) as f64;
+                    let sk = format!("{name} section {}", k + 1);
+                    let section = SpurGear { backlash: g.backlash + crown_thinning(crowning, z, thickness), ..g.clone() };
+                    let pts = section.profile().map_err(profile_err)?;
+                    host.progress(0.1 + 0.6 * k as f32 / CROWN_SECTIONS as f32, "sketching crowned sections");
+                    sketch_profile(host, c.plane, z, &sk, &pts, c.bore)?;
+                    sections.push(json!({"sketch": sk}));
+                }
+                host.progress(0.8, "lofting");
+                host.run("solid.loft", json!({"sections": sections, "operation": "new", "body_name": name}))?;
+            } else if kind == Kind::Spur {
                 host.progress(0.6, "extruding");
                 host.run("solid.extrude", json!({"distance": thickness, "operation": "new", "body_name": name}))?;
             } else {
@@ -311,6 +370,10 @@ pub fn build(host: &mut dyn Host, kind: Kind, params: &Value) -> Result<Value, F
                 out["twist_deg"] = json!(twist);
             }
             out["profile_points"] = json!(pts.len());
+            if crown0 > 0.0 {
+                out["crowning_mm"] = json!(crown0);
+                out["crowning_note"] = json!("each flank is thinned by crowning_mm at both faces, parabolically to nothing at mid-width, lofted through 7 sections");
+            }
             merge(&mut out, extra.take());
             host.progress(1.0, "done");
             Ok(out)
@@ -397,7 +460,7 @@ pub fn build(host: &mut dyn Host, kind: Kind, params: &Value) -> Result<Value, F
             let rack_pts = r.profile().map_err(profile_err)?;
             // Check the pinion before any command runs.
             let pinion = if pinion_teeth > 0 {
-                let g = r.pinion(pinion_teeth, c.flank_points);
+                let g = r.pinion_with(pinion_teeth, c.flank_points, mods(params)?);
                 let (pts, centre) = r.pinion_in_mesh(&g, r.teeth / 2).map_err(profile_err)?;
                 let bore = num(params, "pinion_bore", 0.0)?;
                 check_bore(bore, g.circles().root).map_err(|_| {
@@ -561,6 +624,7 @@ pub fn build(host: &mut dyn Host, kind: Kind, params: &Value) -> Result<Value, F
                 backlash: c.backlash,
                 flank_points: c.flank_points,
                 rim: num(params, "rim", 3.0 * module)?,
+                mods: Mods { shift: 0.0, ..mods(params)? },
             };
             let thickness = length(params, "thickness", 10.0)?;
             let ((sun, _), planets, (ring, _)) = p.layout().map_err(profile_err)?;
@@ -1202,6 +1266,58 @@ mod tests {
         assert!(build(&mut h, Kind::CycloidalDrive, &json!({"output_holes": 20, "output_circle_diameter": 34})).is_err());
         assert!(build(&mut h, Kind::CycloidalDrive, &json!({"eccentricity": 10})).is_err());
         assert!(h.0.is_empty());
+    }
+
+    #[test]
+    fn crowned_spur_is_a_loft_of_thinner_end_sections() {
+        let mut h = Fake::default();
+        let out = build(&mut h, Kind::Spur, &json!({"teeth": 20, "thickness": 12, "crowning": 0.05, "root_fillet": 0.38})).unwrap();
+        let loft = h.0.iter().find(|(c, _)| c == "solid.loft").map(|(_, a)| a).unwrap();
+        assert_eq!(loft["sections"].as_array().unwrap().len(), 7);
+        assert!(h.0.iter().all(|(c, _)| c != "solid.extrude"));
+        // Sections sit at even heights through the face width.
+        let offsets: Vec<f64> = h.0.iter().filter(|(c, _)| c == "sketch.create").map(|(_, a)| a["offset"].as_f64().unwrap_or(0.0)).collect();
+        assert_eq!(offsets, [0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0]);
+        // The end sections' teeth are thinner than the middle's: compare a tooth flank point.
+        let lines: Vec<&Value> = h.0.iter().filter(|(c, _)| c == "sketch.line").map(|(_, a)| a).collect();
+        let angle = |v: &Value, i: usize| v["points"][i][1].as_f64().unwrap().atan2(v["points"][i][0].as_f64().unwrap());
+        let i = 10;
+        // Tooth 0's first flank lies at negative angles; a thinner tooth brings it closer to 0.
+        assert!(angle(lines[0], i) < 0.0);
+        assert!(angle(lines[0], i) > angle(lines[3], i) + 1e-4, "end tooth is thinner than the middle");
+        assert!((angle(lines[0], i) - angle(lines[6], i)).abs() < 1e-9, "both ends match");
+        assert_eq!(out["crowning_mm"], json!(0.05));
+        assert_eq!(out["root_fillet_mm"], json!(0.76));
+        // Too much crowning is refused, by name, before anything is built.
+        let mut h = Fake::default();
+        assert!(matches!(build(&mut h, Kind::Spur, &json!({"crowning": 1.0})), Err(Failure::Input("crowning", _))));
+        assert!(h.0.is_empty());
+    }
+
+    #[test]
+    fn shift_and_undercut_advice_reach_the_reply() {
+        let mut h = Fake::default();
+        let out = build(&mut h, Kind::Spur, &json!({"teeth": 10})).unwrap();
+        let w = out["warnings"][0].as_str().unwrap();
+        assert!(w.contains("profile shift of 0.415"), "{w}");
+        let mut h = Fake::default();
+        let out = build(&mut h, Kind::Spur, &json!({"teeth": 10, "profile_shift": 0.45})).unwrap();
+        assert!(out["warnings"].as_array().unwrap().is_empty());
+        assert!(out["centre_distance_note"].as_str().unwrap().contains("x2 = -x1"));
+        assert_eq!(out["tip_diameter_mm"], json!(2.0 * (10.0 + 2.0 * 1.45)));
+        // Helical takes the shift in the normal plane.
+        let mut h = Fake::default();
+        assert!(build(&mut h, Kind::Helical, &json!({"profile_shift": 0.3, "tip_relief": 0.04})).is_ok());
+        // A planetary set refuses a shift but takes a fillet.
+        let mut h = Fake::default();
+        assert!(build(&mut h, Kind::Planetary, &json!({"root_fillet": 0.38})).is_ok());
+        let mut h = Fake::default();
+        let out = build(&mut h, Kind::Planetary, &json!({"profile_shift": 0.3, "root_fillet": 0.38})).unwrap();
+        assert_eq!(out["ring_teeth"], json!(48), "shift is ignored for planetary sets");
+        // The rack's pinion moves out with its shift.
+        let mut h = Fake::default();
+        let out = build(&mut h, Kind::Rack, &json!({"pinion_teeth": 10, "profile_shift": 0.5})).unwrap();
+        assert!((out["pinion"]["centre_in_sketch_mm"][1].as_f64().unwrap() - 11.0).abs() < 1e-9);
     }
 }
 

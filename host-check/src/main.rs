@@ -9,7 +9,7 @@ struct Recorder { calls: Vec<(String, Value)>, log: Vec<String>, committed: bool
 
 impl PluginHost for Recorder {
     fn command_catalog(&self) -> Vec<CommandSchema> {
-        ["sketch.create", "sketch.line", "sketch.circle.center", "sketch.finish", "solid.extrude", "solid.sweep"]
+        ["sketch.create", "sketch.line", "sketch.circle.center", "sketch.finish", "solid.extrude", "solid.sweep", "solid.loft"]
             .iter()
             .map(|n| CommandSchema { name: n.to_string(), input_schema: json!({"type":"object"}), output_schema: json!({}), effect: Effect::Edit, group: None })
             .collect()
@@ -49,6 +49,12 @@ fn main() {
         ("planetary", "12/18/48 x3, bores", json!({"sun_bore": 5, "planet_bore": 4})),
         ("planetary", "24/12/48 x12? (collide)", json!({"sun_teeth": 24, "planet_teeth": 12, "planets": 12})),
         ("planetary", "30/15/60 x5", json!({"sun_teeth": 30, "planet_teeth": 15, "planets": 5})),
+        ("spur", "10 teeth, shift 0.45, fillet 0.38, relief 0.04", json!({"teeth": 10, "profile_shift": 0.45, "root_fillet": 0.38, "tip_relief": 0.04})),
+        ("spur", "crowned 0.05, bore 8", json!({"crowning": 0.05, "bore": 8})),
+        ("spur", "bad: crowning 1", json!({"crowning": 1})),
+        ("helical", "shift 0.3, fillet, relief", json!({"profile_shift": 0.3, "root_fillet": 0.38, "tip_relief": 0.04})),
+        ("rack", "pinion 10 shifted 0.5", json!({"pinion_teeth": 10, "profile_shift": 0.5, "root_fillet": 0.3})),
+        ("planetary", "filleted and relieved", json!({"root_fillet": 0.38, "tip_relief": 0.05})),
         ("cycloidal", "60:10 pair", json!({})),
         ("cycloidal", "bad: 3 teeth", json!({"mate_teeth": 3})),
         ("cycloidal-drive", "defaults", json!({})),
@@ -60,6 +66,7 @@ fn main() {
         let (host, result) = craft_plugin_wasm::run(Recorder::default(), &manifest, &wasm, entry, &params);
         let mut summary: Vec<String> = host.calls.iter().map(|(c, a)| match a.get("points") {
             Some(p) => format!("{c}({} pts)", p.as_array().map_or(0, |v| v.len())),
+            None if c == "solid.loft" => format!("{c}({} sections)", a["sections"].as_array().map_or(0, |v| v.len())),
             None if c == "solid.sweep" => format!("{c}({} {})", a["operation"], a.get("twist").or(a.get("scale")).unwrap_or(&json!(""))),
             None => c.clone(),
         }).collect();
@@ -68,7 +75,7 @@ fn main() {
         println!("   calls ({}): {}", host.calls.len(), summary.join(" -> "));
         match result {
             Ok(v) => {
-                let keep = ["body", "bodies", "ratio_ring_fixed", "ratio", "pitch_diameter_mm", "twist_deg", "twist_each_half_deg", "pitch_angle_deg", "apex_distance_mm", "lead_mm", "sections", "centre_distance_mm", "helix_angle_deg", "hand", "offset_angle_deg"];
+                let keep = ["body", "bodies", "ratio_ring_fixed", "ratio", "tip_diameter_mm", "crowning_mm", "warnings", "pitch_diameter_mm", "twist_deg", "twist_each_half_deg", "pitch_angle_deg", "apex_distance_mm", "lead_mm", "sections", "centre_distance_mm", "helix_angle_deg", "hand", "offset_angle_deg"];
                 let short: serde_json::Map<String, Value> = v.as_object().unwrap().iter().filter(|(k, _)| keep.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect();
                 println!("   result: {}", Value::Object(short));
             }

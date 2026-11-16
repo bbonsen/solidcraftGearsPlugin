@@ -1,7 +1,7 @@
 //! Writes an SVG of the profiles the plugin draws: `cargo run --example svg > preview.svg`
 //! Top: a 20-tooth gear meshing with a 12-tooth pinion. Bottom: a bevel gear's heel profile
 //! (20:40) and the sections of 1- and 3-start worms, square to their axes.
-use gears::gear::{BevelGear, SpurGear, Worm};
+use gears::gear::{BevelGear, Mods, SpurGear, Worm};
 use std::f64::consts::PI;
 
 fn path(pts: &[[f64; 2]], dx: f64, dy: f64, rot: f64) -> String {
@@ -14,7 +14,7 @@ fn path(pts: &[[f64; 2]], dx: f64, dy: f64, rot: f64) -> String {
 }
 
 fn main() {
-    let a = SpurGear { teeth: 20, module: 2.0, pressure_angle: 20.0, helix_angle: 0.0, backlash: 0.0, flank_points: 8 };
+    let a = SpurGear { teeth: 20, module: 2.0, pressure_angle: 20.0, helix_angle: 0.0, backlash: 0.0, flank_points: 8, mods: Mods::default() };
     let b = SpurGear { teeth: 12, ..a.clone() };
     let cd = f64::from(a.teeth + b.teeth) * a.module / 2.0;
     let bevel = BevelGear { teeth: 20, mate_teeth: 40, module: 2.0, pressure_angle: 20.0, backlash: 0.0, flank_points: 8, face_width: 0.0 };
