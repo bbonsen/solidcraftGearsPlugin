@@ -1,8 +1,8 @@
 {
  "id": "gears",
  "name": "Gears",
- "version": "0.3.0",
- "description": "Involute spur, helical, herringbone, straight bevel and worm gears, plus worm wheels, built as native sketches, extrudes and sweeps.",
+ "version": "0.4.0",
+ "description": "Involute spur, helical, herringbone, straight bevel, worm and rack-and-pinion gears, built as native sketches, extrudes and sweeps.",
  "capabilities": [
   "commands@0.1"
  ],
@@ -592,6 +592,101 @@
       "bore": {
        "type": "number",
        "title": "Bore diameter (mm, 0 = none)",
+       "minimum": 0,
+       "default": 0
+      },
+      "backlash": {
+       "type": "number",
+       "title": "Backlash (mm)",
+       "minimum": 0,
+       "default": 0
+      },
+      "plane": {
+       "type": "string",
+       "title": "Plane",
+       "enum": [
+        "XY",
+        "XZ",
+        "YZ"
+       ],
+       "default": "XY"
+      },
+      "flank_points": {
+       "type": "integer",
+       "title": "Points per flank",
+       "minimum": 2,
+       "maximum": 40,
+       "default": 8
+      }
+     }
+    }
+   },
+   {
+    "name": "rack",
+    "effect": "edit",
+    "slots": [
+     {
+      "kind": "ribbon",
+      "name": "Model"
+     }
+    ],
+    "input_schema": {
+     "type": "object",
+     "properties": {
+      "teeth": {
+       "type": "integer",
+       "title": "Rack teeth",
+       "minimum": 1,
+       "maximum": 500,
+       "default": 20
+      },
+      "module": {
+       "type": "number",
+       "title": "Module (mm)",
+       "minimum": 0.1,
+       "maximum": 50,
+       "default": 2
+      },
+      "pressure_angle": {
+       "type": "number",
+       "title": "Pressure angle",
+       "default": 20,
+       "oneOf": [
+        {
+         "const": 14.5,
+         "title": "14.5°"
+        },
+        {
+         "const": 20,
+         "title": "20° (standard)"
+        },
+        {
+         "const": 25,
+         "title": "25°"
+        }
+       ]
+      },
+      "thickness": {
+       "type": "number",
+       "title": "Face width (mm)",
+       "exclusiveMinimum": 0,
+       "default": 10
+      },
+      "back": {
+       "type": "number",
+       "title": "Bar depth below the teeth (mm, default 2.5 × module)",
+       "exclusiveMinimum": 0
+      },
+      "pinion_teeth": {
+       "type": "integer",
+       "title": "Pinion teeth (0 = rack only)",
+       "minimum": 0,
+       "maximum": 150,
+       "default": 16
+      },
+      "pinion_bore": {
+       "type": "number",
+       "title": "Pinion bore diameter (mm, 0 = none)",
        "minimum": 0,
        "default": 0
       },

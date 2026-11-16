@@ -364,6 +364,102 @@ impl Worm {
     }
 }
 
+/// A straight-toothed rack for a spur pinion. The pitch line lies on y = 0 and the teeth point
+/// up (+y), the first starting at x = 0; the bar's back is `back` mm below the root.
+#[derive(Clone, Debug)]
+pub struct Rack {
+    pub teeth: u32,
+    pub module: f64,
+    pub pressure_angle: f64,
+    pub backlash: f64,
+    /// Material below the root line, mm.
+    pub back: f64,
+}
+
+pub const MAX_RACK_TEETH: u32 = 500;
+
+impl Rack {
+    pub fn validate(&self) -> Result<(), (&'static str, String)> {
+        if !(1..=MAX_RACK_TEETH).contains(&self.teeth) {
+            return Err(("teeth", format!("must be 1..={MAX_RACK_TEETH}")));
+        }
+        if !(self.module.is_finite() && self.module >= 0.1 && self.module <= 50.0) {
+            return Err(("module", "must be 0.1..=50 mm".into()));
+        }
+        if !(self.pressure_angle.is_finite() && (10.0..=30.0).contains(&self.pressure_angle)) {
+            return Err(("pressure_angle", "must be 10..=30 degrees".into()));
+        }
+        if !(self.backlash.is_finite() && self.backlash >= 0.0 && self.backlash < self.module / 2.0) {
+            return Err(("backlash", "must be at least 0 and smaller than half the module".into()));
+        }
+        if !(self.back.is_finite() && self.back > 0.0 && self.back <= 10_000.0) {
+            return Err(("back", "must be more than 0 and at most 10000 mm".into()));
+        }
+        Ok(())
+    }
+
+    pub fn pitch(&self) -> f64 {
+        PI * self.module
+    }
+
+    pub fn length(&self) -> f64 {
+        self.pitch() * f64::from(self.teeth)
+    }
+
+    /// x of tooth `i`'s centre line.
+    pub fn tooth_centre(&self, i: u32) -> f64 {
+        (f64::from(i) + 0.5) * self.pitch()
+    }
+
+    /// Closed outline, counter-clockwise, last point not repeated. Exact: rack flanks are
+    /// straight lines at the pressure angle.
+    pub fn profile(&self) -> Result<Vec<[f64; 2]>, (&'static str, String)> {
+        self.validate()?;
+        let m = self.module;
+        let tan_a = self.pressure_angle.to_radians().tan();
+        // Half the tooth thickness at height y above the pitch line.
+        let half = |y: f64| (PI * m / 2.0 - self.backlash) / 2.0 - y * tan_a;
+        let (tip, root) = (m, -1.25 * m);
+        let (s_tip, s_root) = (half(tip), half(root));
+        if s_tip <= 0.0 || 2.0 * s_root >= self.pitch() {
+            return Err(("pressure_angle", "the teeth come to a point or close the gaps; use a smaller pressure angle".into()));
+        }
+        let bottom = root - self.back;
+        let mut out = vec![[self.length(), bottom], [self.length(), root]];
+        // Along the top from right to left keeps the outline counter-clockwise.
+        for i in (0..self.teeth).rev() {
+            let x = self.tooth_centre(i);
+            out.extend([[x + s_root, root], [x + s_tip, tip], [x - s_tip, tip], [x - s_root, root]]);
+        }
+        out.extend([[0.0, root], [0.0, bottom]]);
+        Ok(out)
+    }
+
+    /// The spur pinion that meshes with this rack.
+    pub fn pinion(&self, teeth: u32, flank_points: u32) -> SpurGear {
+        SpurGear {
+            teeth,
+            module: self.module,
+            pressure_angle: self.pressure_angle,
+            helix_angle: 0.0,
+            backlash: self.backlash,
+            flank_points,
+        }
+    }
+
+    /// `pinion`'s profile placed in mesh over rack tooth `i`: centre on (tooth centre, pitch
+    /// radius), turned so a tooth gap straddles that rack tooth. Returns (points, centre).
+    pub fn pinion_in_mesh(&self, pinion: &SpurGear, i: u32) -> Result<(Vec<[f64; 2]>, [f64; 2]), (&'static str, String)> {
+        let pts = pinion.profile()?;
+        let centre = [self.tooth_centre(i), pinion.circles().pitch];
+        // The profile's tooth 0 is on +x, so a gap is centred at π/z; turn it to point down.
+        let rot = -PI / 2.0 - PI / f64::from(pinion.teeth);
+        let (sin, cos) = rot.sin_cos();
+        let pts = pts.iter().map(|p| [p[0] * cos - p[1] * sin + centre[0], p[0] * sin + p[1] * cos + centre[1]]).collect();
+        Ok((pts, centre))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -565,6 +661,81 @@ mod tests {
             Worm { backlash: 5.0, ..worm(1) },
         ] {
             assert!(w.section(0.0).is_err(), "{w:?}");
+        }
+    }
+
+    fn rack(teeth: u32) -> Rack {
+        Rack { teeth, module: 2.0, pressure_angle: 20.0, backlash: 0.0, back: 5.0 }
+    }
+
+    #[test]
+    fn rack_teeth_have_the_standard_shape() {
+        let r = rack(10);
+        let pts = r.profile().unwrap();
+        assert_eq!(pts.len(), 4 + 4 * 10);
+        // Signed area > 0: counter-clockwise.
+        let area: f64 = (0..pts.len()).map(|i| {
+            let (a, b) = (pts[i], pts[(i + 1) % pts.len()]);
+            a[0] * b[1] - b[0] * a[1]
+        }).sum::<f64>() / 2.0;
+        assert!(area > 0.0);
+        // Bar (length × back, below the root line) plus 10 trapezoid teeth of height 2.25 m.
+        let tan_a = 20f64.to_radians().tan();
+        let (s_tip, s_root) = (PI / 2.0 - 2.0 * tan_a, PI / 2.0 + 2.5 * tan_a);
+        let tooth = (s_tip + s_root) * 4.5;
+        let bar = 20.0 * PI * 5.0;
+        assert!((area - (bar + 10.0 * tooth)).abs() < 1e-9, "{area}");
+        // Teeth are half the pitch thick at the pitch line: the flank crosses y = 0 at x ± π m / 4.
+        let [x0, y0] = pts[2];
+        let [x1, y1] = pts[3];
+        let x_at_pitch = x0 + (x1 - x0) * (0.0 - y0) / (y1 - y0);
+        assert!((x_at_pitch - (r.tooth_centre(9) + PI / 2.0)).abs() < 1e-12);
+        // Flank slope is the pressure angle.
+        assert!((((x0 - x1) / (y1 - y0)).atan() - 20f64.to_radians()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn pinion_sits_on_the_pitch_line_with_a_gap_over_the_rack_tooth() {
+        let r = rack(10);
+        fn inside(poly: &[[f64; 2]], p: [f64; 2]) -> bool {
+            let mut odd = false;
+            for i in 0..poly.len() {
+                let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
+                if (a[1] > p[1]) != (b[1] > p[1]) && p[0] < a[0] + (p[1] - a[1]) * (b[0] - a[0]) / (b[1] - a[1]) {
+                    odd = !odd;
+                }
+            }
+            odd
+        }
+        let rack_pts = r.profile().unwrap();
+        for z in [8, 12, 13, 20, 40] {
+            let g = r.pinion(z, 12);
+            let (pts, c) = r.pinion_in_mesh(&g, 5).unwrap();
+            assert!((c[1] - g.circles().pitch).abs() < 1e-12);
+            // No interference either way.
+            for &p in &pts {
+                assert!(!inside(&rack_pts, p), "z={z}: pinion point {p:?} inside the rack");
+            }
+            for &p in &rack_pts {
+                assert!(!inside(&pts, p), "z={z}: rack corner {p:?} inside the pinion");
+            }
+            // And they are in mesh, not just apart: some pinion tooth tip reaches below the
+            // rack's tip line (y = m), into a rack gap.
+            assert!(pts.iter().any(|p| p[1] < 2.0 - 0.5), "z={z}: pinion does not reach into the rack");
+        }
+    }
+
+    #[test]
+    fn rack_refuses_hostile_input() {
+        for r in [
+            Rack { teeth: 0, ..rack(1) },
+            Rack { teeth: 501, ..rack(1) },
+            Rack { module: f64::NAN, ..rack(1) },
+            Rack { pressure_angle: 40.0, ..rack(1) },
+            Rack { back: 0.0, ..rack(1) },
+            Rack { backlash: 2.0, ..rack(1) },
+        ] {
+            assert!(r.profile().is_err(), "{r:?}");
         }
     }
 }

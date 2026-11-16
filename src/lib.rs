@@ -4,7 +4,7 @@
 
 pub mod gear;
 
-use gear::{BevelGear, SpurGear, Worm};
+use gear::{BevelGear, Rack, SpurGear, Worm};
 use serde_json::{json, Value};
 use std::f64::consts::PI;
 
@@ -49,6 +49,7 @@ pub enum Kind {
     Bevel,
     Worm,
     WormWheel,
+    Rack,
 }
 
 impl Kind {
@@ -60,6 +61,7 @@ impl Kind {
             "bevel" => Some(Kind::Bevel),
             "worm" => Some(Kind::Worm),
             "worm-wheel" => Some(Kind::WormWheel),
+            "rack" => Some(Kind::Rack),
             _ => None,
         }
     }
@@ -136,8 +138,20 @@ fn profile_err((f, r): (&'static str, String)) -> Failure {
     Failure::Input(f, r)
 }
 
-/// Sketch a closed profile (and optional bore) on `plane`, `offset` mm along its normal.
+/// Sketch a closed profile (and optional bore at the origin) on `plane`, `offset` mm along its normal.
 fn sketch_profile(host: &mut dyn Host, plane: &str, offset: f64, name: &str, pts: &[[f64; 2]], bore: f64) -> Result<(), Failure> {
+    sketch_profile_at(host, plane, offset, name, pts, bore, [0.0, 0.0])
+}
+
+fn sketch_profile_at(
+    host: &mut dyn Host,
+    plane: &str,
+    offset: f64,
+    name: &str,
+    pts: &[[f64; 2]],
+    bore: f64,
+    centre: [f64; 2],
+) -> Result<(), Failure> {
     let mut args = json!({"plane": plane, "name": name});
     if offset != 0.0 {
         args["offset"] = json!(round(offset));
@@ -146,7 +160,7 @@ fn sketch_profile(host: &mut dyn Host, plane: &str, offset: f64, name: &str, pts
     let pts: Vec<Value> = pts.iter().map(|p| json!([round(p[0]), round(p[1])])).collect();
     host.run("sketch.line", json!({"points": pts, "closed": true}))?;
     if bore > 0.0 {
-        host.run("sketch.circle.center", json!({"center": [0, 0], "diameter": bore}))?;
+        host.run("sketch.circle.center", json!({"center": [round(centre[0]), round(centre[1])], "diameter": bore}))?;
     }
     host.run("sketch.finish", json!({}))?;
     if host.cancelled() {
@@ -375,6 +389,62 @@ pub fn build(host: &mut dyn Host, kind: Kind, params: &Value) -> Result<Value, F
                 "mating_note": "make the mate with teeth and mate_teeth swapped; the two axes meet at 90 degrees at the cone apex, apex_distance_mm along each gear's axis from its heel plane",
                 "approximation": "Tredgold's back-cone approximation, the usual way straight bevel teeth are drawn",
             }))
+        }
+        Kind::Rack => {
+            let module = num(params, "module", 2.0)?;
+            let r = Rack {
+                teeth: int(params, "teeth", 20)?,
+                module,
+                pressure_angle: num(params, "pressure_angle", 20.0)?,
+                backlash: c.backlash,
+                back: num(params, "back", 2.5 * module)?,
+            };
+            let thickness = length(params, "thickness", 10.0)?;
+            let pinion_teeth = int(params, "pinion_teeth", 16)?;
+            let rack_pts = r.profile().map_err(profile_err)?;
+            // Check the pinion before any command runs.
+            let pinion = if pinion_teeth > 0 {
+                let g = r.pinion(pinion_teeth, c.flank_points);
+                let (pts, centre) = r.pinion_in_mesh(&g, r.teeth / 2).map_err(profile_err)?;
+                let bore = num(params, "pinion_bore", 0.0)?;
+                check_bore(bore, g.circles().root).map_err(|_| {
+                    Failure::Input("pinion_bore", format!("must be 0 (none) or less than {:.3} mm", 1.8 * g.circles().root))
+                })?;
+                Some((g, pts, centre, bore))
+            } else {
+                None
+            };
+            let name = format!("Rack m{} x{}", r.module, r.teeth);
+            host.progress(0.1, "sketching rack");
+            sketch_profile(host, c.plane, 0.0, &name, &rack_pts, 0.0)?;
+            host.run("solid.extrude", json!({"sketch": name, "distance": thickness, "operation": "new", "body_name": name}))?;
+            let mut out = json!({
+                "body": name,
+                "teeth": r.teeth,
+                "module_mm": r.module,
+                "pressure_angle_deg": r.pressure_angle,
+                "circular_pitch_mm": r.pitch(),
+                "length_mm": r.length(),
+                "pitch_line": "sketch y = 0; tips at y = module, root at y = -1.25 module, back at y = -1.25 module - back",
+                "rack_points": rack_pts.len(),
+            });
+            if let Some((g, pts, centre, bore)) = pinion {
+                let pname = format!("Pinion z{} m{}", g.teeth, g.module);
+                host.progress(0.5, "sketching pinion");
+                sketch_profile_at(host, c.plane, 0.0, &pname, &pts, bore, centre)?;
+                host.run("solid.extrude", json!({"sketch": pname, "distance": thickness, "operation": "new", "body_name": pname}))?;
+                let mut p = describe(&g, &pname);
+                if let Some(o) = p.as_object_mut() {
+                    o.remove("centre_distance_note");
+                }
+                p["centre_in_sketch_mm"] = json!([centre[0], centre[1]]);
+                p["rack_travel_per_turn_mm"] = json!(r.pitch() * f64::from(g.teeth));
+                p["profile_points"] = json!(pts.len());
+                out["pinion"] = p;
+                out["mating_note"] = json!("the pinion's pitch circle touches the rack's pitch line; one pinion turn moves the rack rack_travel_per_turn_mm");
+            }
+            host.progress(1.0, "done");
+            Ok(out)
         }
         Kind::Worm => {
             let w = worm(params, &c)?;
@@ -672,6 +742,40 @@ mod tests {
         assert!((out["pitch_diameter_mm"].as_f64().unwrap() - 60.0).abs() < 1e-9);
         assert!((out["centre_distance_mm"].as_f64().unwrap() - 40.0).abs() < 1e-9);
         assert_eq!(out["ratio"], json!(15.0));
+    }
+
+    #[test]
+    fn rack_builds_the_bar_and_a_meshing_pinion() {
+        let mut h = Fake::default();
+        let out = build(&mut h, Kind::Rack, &json!({"teeth": 12, "pinion_teeth": 18, "pinion_bore": 6, "thickness": 8})).unwrap();
+        assert_eq!(
+            names(&h),
+            [
+                "sketch.create", "sketch.line", "sketch.finish", "solid.extrude",
+                "sketch.create", "sketch.line", "sketch.circle.center", "sketch.finish", "solid.extrude",
+            ]
+        );
+        assert_eq!(h.0[3].1["body_name"], out["body"]);
+        assert_eq!(h.0[8].1["body_name"], out["pinion"]["body"]);
+        assert_eq!(h.0[8].1["operation"], json!("new"));
+        // The pinion sits over rack tooth 6, its centre one pitch radius above the pitch line.
+        let centre = [6.5 * 2.0 * PI, 18.0];
+        assert_eq!(h.0[6].1["center"], json!([round(centre[0]), round(centre[1])]));
+        assert!((out["pinion"]["rack_travel_per_turn_mm"].as_f64().unwrap() - 36.0 * PI).abs() < 1e-9);
+
+        let mut h = Fake::default();
+        let out = build(&mut h, Kind::Rack, &json!({"pinion_teeth": 0})).unwrap();
+        assert_eq!(names(&h), ["sketch.create", "sketch.line", "sketch.finish", "solid.extrude"]);
+        assert!(out.get("pinion").is_none());
+    }
+
+    #[test]
+    fn rack_refuses_bad_input_before_any_command() {
+        for p in [json!({"teeth": 0}), json!({"pinion_teeth": 3}), json!({"pinion_bore": 100}), json!({"back": -1})] {
+            let mut h = Fake::default();
+            assert!(build(&mut h, Kind::Rack, &p).is_err(), "{p}");
+            assert!(h.0.is_empty(), "{p}");
+        }
     }
 }
 

@@ -38,6 +38,9 @@ fn main() {
         ("worm", "1 start, defaults", json!({})),
         ("worm", "2 starts, 30 turns", json!({"starts": 2, "length": 377})),
         ("worm-wheel", "30 teeth for 1-start worm", json!({"teeth": 30})),
+        ("rack", "defaults (with 16-tooth pinion)", json!({})),
+        ("rack", "500 teeth, pinion bore 8", json!({"teeth": 500, "pinion_teeth": 24, "pinion_bore": 8})),
+        ("rack", "bad: pinion bore too big", json!({"pinion_bore": 100})),
     ];
     for (entry, label, params) in cases {
         let label = format!("{entry} {label}");
