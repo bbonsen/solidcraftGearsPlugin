@@ -664,6 +664,195 @@ impl Planetary {
     }
 }
 
+/// A cycloidal-tooth gear, as in clocks. Above the pitch circle each flank is an epicycloid
+/// traced by a circle of half the mating gear's pitch radius rolling on this gear's pitch
+/// circle; below it the flank is radial (the hypocycloid of a circle of half this gear's own
+/// pitch radius is a straight line). Its mate is built the same way with the roles swapped.
+#[derive(Clone, Debug)]
+pub struct CycloidalGear {
+    pub teeth: u32,
+    pub mate_teeth: u32,
+    pub module: f64,
+    pub backlash: f64,
+    pub flank_points: u32,
+}
+
+impl CycloidalGear {
+    pub fn validate(&self) -> Result<(), (&'static str, String)> {
+        for (f, z) in [("teeth", self.teeth), ("mate_teeth", self.mate_teeth)] {
+            if !(MIN_TEETH..=300).contains(&z) {
+                return Err((f, format!("must be {MIN_TEETH}..=300")));
+            }
+        }
+        if !(self.module.is_finite() && self.module >= 0.1 && self.module <= 50.0) {
+            return Err(("module", "must be 0.1..=50 mm".into()));
+        }
+        if !(self.backlash.is_finite() && self.backlash >= 0.0 && self.backlash < self.module / 2.0) {
+            return Err(("backlash", "must be at least 0 and smaller than half the module".into()));
+        }
+        if !(2..=40).contains(&self.flank_points) {
+            return Err(("flank_points", "must be 2..=40".into()));
+        }
+        Ok(())
+    }
+
+    pub fn pitch_radius(&self) -> f64 {
+        self.module * f64::from(self.teeth) / 2.0
+    }
+
+    pub fn root_radius(&self) -> f64 {
+        self.pitch_radius() - 1.25 * self.module
+    }
+
+    pub fn mate(&self) -> CycloidalGear {
+        CycloidalGear { teeth: self.mate_teeth, mate_teeth: self.teeth, ..self.clone() }
+    }
+
+    /// One flank, root to tip, and the tip radius reached (r + m, or less where the flanks meet).
+    fn flank(&self) -> (Flank, f64) {
+        let r = self.pitch_radius();
+        let b = self.module * f64::from(self.mate_teeth) / 4.0; // half the mate's pitch radius
+        let psi_p = (PI * self.module / 2.0 - self.backlash) / (2.0 * r);
+        // Point of the epicycloid after the rolling circle has turned through φ about the gear.
+        let epi = |phi: f64| {
+            let k = (r + b) / b;
+            let (x, y) = ((r + b) * phi.cos() - b * (k * phi).cos(), (r + b) * phi.sin() - b * (k * phi).sin());
+            (x.hypot(y), psi_p - y.atan2(x))
+        };
+        // Find φ where the flank reaches r + m, or where it would cross the tooth's centre line.
+        let (mut lo, mut hi) = (0.0, PI / 2.0);
+        for _ in 0..100 {
+            let mid = (lo + hi) / 2.0;
+            let (rr, psi) = epi(mid);
+            if rr < r + self.module && psi > 0.02 * psi_p {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        let n = self.flank_points as usize;
+        let mut flank = vec![(self.root_radius(), psi_p)];
+        // Points closer together near the tip, where the epicycloid curves most.
+        flank.extend((0..n).map(|i| {
+            let t = i as f64 / (n - 1) as f64;
+            epi(lo * (1.0 - (1.0 - t) * (1.0 - t)))
+        }));
+        let tip = flank.last().map_or(r, |f| f.0);
+        (flank, tip)
+    }
+
+    pub fn tip_radius(&self) -> f64 {
+        self.flank().1
+    }
+
+    pub fn profile(&self) -> Result<Vec<[f64; 2]>, (&'static str, String)> {
+        self.validate()?;
+        assemble(self.teeth, &self.flank().0, 0.0)
+    }
+
+    /// (this gear at the origin, its mate in mesh on +x). Cycloidal gears run correctly only at
+    /// exactly this centre distance.
+    pub fn pair(&self) -> Result<(Placed, Placed), (&'static str, String)> {
+        let a = self.pitch_radius() + self.mate().pitch_radius();
+        let z2 = f64::from(self.mate_teeth);
+        Ok(((self.profile()?, [0.0, 0.0]), place(self.mate().profile()?, PI - PI / z2, [a, 0.0])))
+    }
+}
+
+/// A cycloidal drive: a lobed disc (one lobe fewer than pins) rolling on an eccentric inside a
+/// ring of pins. The housing here carries the pins as half-round bumps on its bore.
+#[derive(Clone, Debug)]
+pub struct CycloidalDrive {
+    pub pins: u32,
+    /// Radius of the circle through the pin centres.
+    pub pin_circle: f64,
+    pub pin_radius: f64,
+    pub eccentricity: f64,
+    /// Points per disc lobe.
+    pub lobe_points: u32,
+}
+
+impl CycloidalDrive {
+    pub fn validate(&self) -> Result<(), (&'static str, String)> {
+        if !(4..=60).contains(&self.pins) {
+            return Err(("pins", "must be 4..=60".into()));
+        }
+        if !(self.pin_circle.is_finite() && self.pin_circle >= 5.0 && self.pin_circle <= 5000.0) {
+            return Err(("pin_circle_diameter", "must be 10..=10000 mm".into()));
+        }
+        let gap = 2.0 * self.pin_circle * (PI / f64::from(self.pins)).sin();
+        if !(self.pin_radius.is_finite() && self.pin_radius > 0.0 && 2.0 * self.pin_radius < 0.8 * gap) {
+            return Err(("pin_diameter", format!("must be more than 0 and less than {:.3} mm, so the pins do not touch", 0.8 * gap)));
+        }
+        let e_max = self.pin_circle / f64::from(self.pins);
+        if !(self.eccentricity.is_finite() && self.eccentricity > 0.0 && self.eccentricity < e_max) {
+            return Err(("eccentricity", format!("must be more than 0 and less than {e_max:.3} mm (pin circle radius / pins)")));
+        }
+        if !(8..=200).contains(&self.lobe_points) {
+            return Err(("lobe_points", "must be 8..=200".into()));
+        }
+        Ok(())
+    }
+
+    pub fn ratio(&self) -> f64 {
+        f64::from(self.pins - 1)
+    }
+
+    /// The disc's outline about its own centre, which sits at (eccentricity, 0) when placed.
+    pub fn disc(&self) -> Result<Vec<[f64; 2]>, (&'static str, String)> {
+        self.validate()?;
+        let (n, r, rr, e) = (f64::from(self.pins), self.pin_circle, self.pin_radius, self.eccentricity);
+        let count = (self.pins - 1) * self.lobe_points;
+        let mut pts: Vec<[f64; 2]> = (0..count)
+            .map(|i| {
+                let t = 2.0 * PI * f64::from(i) / f64::from(count);
+                let psi = ((1.0 - n) * t).sin().atan2(r / (e * n) - ((1.0 - n) * t).cos());
+                [r * t.cos() - rr * (t + psi).cos() - e * (n * t).cos(), -r * t.sin() + rr * (t + psi).sin() + e * (n * t).sin()]
+            })
+            .collect();
+        // The formula runs clockwise; keep outlines counter-clockwise.
+        pts.reverse();
+        // A pin too large for the lobes' curvature folds the outline over itself: refuse it.
+        for i in 0..pts.len() {
+            let (a, b) = (pts[i], pts[(i + 1) % pts.len()]);
+            let d = (b[1].atan2(b[0]) - a[1].atan2(a[0]) + PI).rem_euclid(2.0 * PI) - PI;
+            if d <= 0.0 {
+                return Err(("pin_diameter", "the disc outline folds over itself; use smaller pins or less eccentricity".into()));
+            }
+        }
+        Ok(pts)
+    }
+
+    /// The housing's bore: the pin circle with each pin's inner half standing in from it.
+    pub fn housing_bore(&self) -> Result<Vec<[f64; 2]>, (&'static str, String)> {
+        self.validate()?;
+        let (n, r, rr) = (self.pins, self.pin_circle, self.pin_radius);
+        let step = 2.0 * PI / f64::from(n);
+        // Where a pin's circle crosses the pin circle: γ about the pin's centre from the inward
+        // direction, δ about the drive's centre from the pin.
+        let gamma = (rr / (2.0 * r)).acos();
+        let delta = (rr * gamma.sin() / r).asin();
+        let arc_pts = self.lobe_points as usize;
+        let mut out = Vec::new();
+        for k in 0..n {
+            let th = step * f64::from(k);
+            let (cx, cy) = (r * th.cos(), r * th.sin());
+            // The pin's inner arc, from the crossing at th − δ round to the one at th + δ.
+            for j in 0..=arc_pts {
+                let u = th + PI + gamma - 2.0 * gamma * j as f64 / arc_pts as f64;
+                out.push([cx + rr * u.cos(), cy + rr * u.sin()]);
+            }
+            // Along the pin circle to the next pin.
+            let (a0, a1) = (th + delta, th + step - delta);
+            for j in 1..arc_pts {
+                let a = a0 + (a1 - a0) * j as f64 / arc_pts as f64;
+                out.push([r * a.cos(), r * a.sin()]);
+            }
+        }
+        Ok(out)
+    }
+}
+
 /// A straight-toothed rack for a spur pinion. The pitch line lies on y = 0 and the teeth point
 /// up (+y), the first starting at x = 0; the bar's back is `back` mm below the root.
 #[derive(Clone, Debug)]
@@ -1234,6 +1423,132 @@ mod tests {
         // 6 planets of 18 teeth around a 12-tooth sun collide (60 divides by 6).
         assert_eq!(planetary(12, 18, 6).layout().unwrap_err().0, "planets");
         assert_eq!(planetary(3, 18, 3).layout().unwrap_err().0, "sun_teeth");
+    }
+
+    fn cyc(z: u32, mate: u32) -> CycloidalGear {
+        CycloidalGear { teeth: z, mate_teeth: mate, module: 1.0, backlash: 0.03, flank_points: 16 }
+    }
+
+    #[test]
+    fn cycloidal_addendum_is_an_epicycloid_and_dedendum_radial() {
+        let g = cyc(60, 10);
+        let pts = g.profile().unwrap();
+        simple_ccw(&pts, g.root_radius(), g.pitch_radius() + 1.0);
+        let (flank, tip) = g.flank();
+        // Radial below the pitch circle: same half angle at the root and the pitch circle.
+        assert!((flank[0].1 - flank[1].1).abs() < 1e-15);
+        assert!((flank[1].0 - g.pitch_radius()).abs() < 1e-12);
+        // Each epicycloid point is at distance b from a rolling-circle centre on radius r + b,
+        // and the circle has rolled without slipping.
+        let (r, b) = (g.pitch_radius(), 10.0 / 4.0);
+        for &(rr, psi) in &flank[1..] {
+            let ang = (PI * 1.0 / 2.0 - 0.03) / (2.0 * r) - psi;
+            let p = [rr * ang.cos(), rr * ang.sin()];
+            // Solve for φ by the angle of the rolling circle's centre: try a fine search.
+            let best = (0..20000)
+                .map(|i| {
+                    let phi = i as f64 * 1e-5;
+                    let c = [(r + b) * phi.cos(), (r + b) * phi.sin()];
+                    ((p[0] - c[0]).hypot(p[1] - c[1]) - b).abs()
+                })
+                .fold(f64::MAX, f64::min);
+            assert!(best < 1e-3, "{best}");
+        }
+        assert!(tip <= r + 1.0 + 1e-9);
+    }
+
+    #[test]
+    fn cycloidal_pairs_mesh_without_interference() {
+        for (z1, z2) in [(60, 10), (48, 8), (30, 30), (12, 64)] {
+            let g = cyc(z1, z2);
+            let ((a, _), (b, c)) = g.pair().unwrap();
+            assert!((c[0] - (z1 + z2) as f64 / 2.0).abs() < 1e-12);
+            for &p in &b {
+                assert!(!inside_poly(&a, p), "{z1}/{z2}: mate point {p:?} in the gear");
+            }
+            for &p in &a {
+                assert!(!inside_poly(&b, p), "{z1}/{z2}: gear point {p:?} in the mate");
+            }
+            // Engaged: the mate reaches inside the gear's tip circle.
+            assert!(b.iter().any(|p| polar(*p).0 < g.tip_radius() - 0.3), "{z1}/{z2}");
+            // Turned half a tooth, it clashes.
+            let turned: Vec<[f64; 2]> = b
+                .iter()
+                .map(|q| {
+                    let t = PI / z2 as f64;
+                    let (x, y) = (q[0] - c[0], q[1] - c[1]);
+                    [x * t.cos() - y * t.sin() + c[0], x * t.sin() + y * t.cos() + c[1]]
+                })
+                .collect();
+            assert!(turned.iter().any(|&p| inside_poly(&a, p)), "{z1}/{z2}: clash not caught");
+        }
+    }
+
+    fn drive() -> CycloidalDrive {
+        CycloidalDrive { pins: 12, pin_circle: 30.0, pin_radius: 3.0, eccentricity: 1.5, lobe_points: 80 }
+    }
+
+    fn dist_to_outline(poly: &[[f64; 2]], p: [f64; 2]) -> f64 {
+        (0..poly.len())
+            .map(|i| {
+                let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
+                let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+                let u = (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / (dx * dx + dy * dy)).clamp(0.0, 1.0);
+                (a[0] + u * dx - p[0]).hypot(a[1] + u * dy - p[1])
+            })
+            .fold(f64::MAX, f64::min)
+    }
+
+    #[test]
+    fn cycloid_disc_touches_every_pin_and_crosses_none() {
+        for d in [drive(), CycloidalDrive { pins: 20, pin_circle: 40.0, pin_radius: 2.5, eccentricity: 1.0, ..drive() }] {
+            let disc: Vec<[f64; 2]> = d.disc().unwrap().iter().map(|p| [p[0] + d.eccentricity, p[1]]).collect();
+            simple_ccw(&disc.iter().map(|p| [p[0] - d.eccentricity, p[1]]).collect::<Vec<_>>(), 0.0, 1e9);
+            for k in 0..d.pins {
+                let th = 2.0 * PI * f64::from(k) / f64::from(d.pins);
+                let c = [d.pin_circle * th.cos(), d.pin_circle * th.sin()];
+                assert!(!inside_poly(&disc, c), "pin {k} centre inside the disc");
+                let gap = dist_to_outline(&disc, c);
+                // Chord error only: it falls as 1/points² (0.0045 mm at 80 points per lobe).
+                assert!((gap - d.pin_radius).abs() < 0.006, "pin {k}: {gap}");
+            }
+            // The housing bore's pins are the same pins: the disc stays inside the bore.
+            let bore = d.housing_bore().unwrap();
+            for &p in &disc {
+                assert!(inside_poly(&bore, [p[0] * 0.999, p[1] * 0.999]), "disc point {p:?} in the housing");
+            }
+            // Each pin's arc reaches a little further round than where it meets the pin circle,
+            // so the bore is not star-shaped about the centre; check it never crosses itself.
+            assert!(bore.iter().all(|p| {
+                let r = polar(*p).0;
+                r >= d.pin_circle - d.pin_radius - 1e-9 && r <= d.pin_circle + 1e-9
+            }));
+            let n = bore.len();
+            let cross = |a: [f64; 2], b: [f64; 2], c: [f64; 2]| (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+            for i in 0..n {
+                for j in i + 2..n {
+                    if i == 0 && j == n - 1 {
+                        continue;
+                    }
+                    let (a, b, c, e) = (bore[i], bore[(i + 1) % n], bore[j], bore[(j + 1) % n]);
+                    let hit = cross(a, b, c) * cross(a, b, e) < 0.0 && cross(c, e, a) * cross(c, e, b) < 0.0;
+                    assert!(!hit, "bore segments {i} and {j} cross");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cycloidal_drive_refuses_impossible_sizes() {
+        for d in [
+            CycloidalDrive { pins: 2, ..drive() },
+            CycloidalDrive { eccentricity: 3.0, ..drive() },
+            CycloidalDrive { pin_radius: 7.0, ..drive() },
+            CycloidalDrive { pin_circle: f64::NAN, ..drive() },
+            CycloidalDrive { eccentricity: 2.4, pin_radius: 6.0, ..drive() },
+        ] {
+            assert!(d.disc().is_err(), "{d:?}");
+        }
     }
 }
 

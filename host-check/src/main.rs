@@ -49,6 +49,11 @@ fn main() {
         ("planetary", "12/18/48 x3, bores", json!({"sun_bore": 5, "planet_bore": 4})),
         ("planetary", "24/12/48 x12? (collide)", json!({"sun_teeth": 24, "planet_teeth": 12, "planets": 12})),
         ("planetary", "30/15/60 x5", json!({"sun_teeth": 30, "planet_teeth": 15, "planets": 5})),
+        ("cycloidal", "60:10 pair", json!({})),
+        ("cycloidal", "bad: 3 teeth", json!({"mate_teeth": 3})),
+        ("cycloidal-drive", "defaults", json!({})),
+        ("cycloidal-drive", "bore 10, 6 output holes", json!({"disc_bore": 10, "output_holes": 6, "output_pin_diameter": 4, "output_circle_diameter": 34})),
+        ("cycloidal-drive", "bad: eccentricity 10", json!({"eccentricity": 10})),
     ];
     for (entry, label, params) in cases {
         let label = format!("{entry} {label}");
@@ -63,7 +68,7 @@ fn main() {
         println!("   calls ({}): {}", host.calls.len(), summary.join(" -> "));
         match result {
             Ok(v) => {
-                let keep = ["body", "bodies", "ratio_ring_fixed", "pitch_diameter_mm", "twist_deg", "twist_each_half_deg", "pitch_angle_deg", "apex_distance_mm", "lead_mm", "sections", "centre_distance_mm", "helix_angle_deg", "hand", "offset_angle_deg"];
+                let keep = ["body", "bodies", "ratio_ring_fixed", "ratio", "pitch_diameter_mm", "twist_deg", "twist_each_half_deg", "pitch_angle_deg", "apex_distance_mm", "lead_mm", "sections", "centre_distance_mm", "helix_angle_deg", "hand", "offset_angle_deg"];
                 let short: serde_json::Map<String, Value> = v.as_object().unwrap().iter().filter(|(k, _)| keep.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect();
                 println!("   result: {}", Value::Object(short));
             }

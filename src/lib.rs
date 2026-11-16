@@ -4,7 +4,7 @@
 
 pub mod gear;
 
-use gear::{BevelGear, Hypoid, InternalGear, Planetary, Rack, SpurGear, Worm};
+use gear::{BevelGear, CycloidalDrive, CycloidalGear, Hypoid, InternalGear, Planetary, Rack, SpurGear, Worm};
 use serde_json::{json, Value};
 use std::f64::consts::PI;
 
@@ -53,6 +53,8 @@ pub enum Kind {
     Hypoid,
     Internal,
     Planetary,
+    Cycloidal,
+    CycloidalDrive,
 }
 
 impl Kind {
@@ -68,6 +70,8 @@ impl Kind {
             "hypoid" => Some(Kind::Hypoid),
             "internal" => Some(Kind::Internal),
             "planetary" => Some(Kind::Planetary),
+            "cycloidal" => Some(Kind::Cycloidal),
+            "cycloidal-drive" => Some(Kind::CycloidalDrive),
             _ => None,
         }
     }
@@ -613,6 +617,142 @@ pub fn build(host: &mut dyn Host, kind: Kind, params: &Value) -> Result<Value, F
                 "warnings": warnings,
             }))
         }
+        Kind::Cycloidal => {
+            let g = CycloidalGear {
+                teeth: int(params, "teeth", 60)?,
+                mate_teeth: int(params, "mate_teeth", 10)?,
+                module: num(params, "module", 1.0)?,
+                backlash: c.backlash,
+                flank_points: int(params, "flank_points", 12)?,
+            };
+            let both = match params.get("build").and_then(Value::as_str).unwrap_or("both") {
+                "both" => true,
+                "gear" => false,
+                _ => return Err(Failure::Input("build", "must be both or gear".into())),
+            };
+            let thickness = length(params, "thickness", 6.0)?;
+            let ((gear_pts, _), (mate_pts, mate_centre)) = g.pair().map_err(profile_err)?;
+            check_bore(c.bore, g.root_radius())?;
+            let mate_bore = num(params, "mate_bore", 0.0)?;
+            check_bore(mate_bore, g.mate().root_radius())
+                .map_err(|f| match f { Failure::Input(_, r) => Failure::Input("mate_bore", r), other => other })?;
+            let name = format!("Cycloidal gear z{} m{}", g.teeth, g.module);
+            let mate_name = format!("Cycloidal gear z{} m{}", g.mate_teeth, g.module);
+            let mate_name = if mate_name == name { format!("{mate_name} mate") } else { mate_name };
+            host.progress(0.1, "gear");
+            sketch_profile(host, c.plane, 0.0, &name, &gear_pts, c.bore)?;
+            host.run("solid.extrude", json!({"sketch": name, "distance": thickness, "operation": "new", "body_name": name}))?;
+            let mut bodies = vec![name.clone()];
+            if both {
+                host.progress(0.5, "mate");
+                sketch_profile_at(host, c.plane, 0.0, &mate_name, &mate_pts, mate_bore, mate_centre)?;
+                host.run("solid.extrude", json!({"sketch": mate_name, "distance": thickness, "operation": "new", "body_name": mate_name}))?;
+                bodies.push(mate_name);
+            }
+            host.progress(1.0, "done");
+            Ok(json!({
+                "bodies": bodies,
+                "teeth": g.teeth,
+                "mate_teeth": g.mate_teeth,
+                "module_mm": g.module,
+                "pitch_diameter_mm": 2.0 * g.pitch_radius(),
+                "tip_diameter_mm": 2.0 * g.tip_radius(),
+                "root_diameter_mm": 2.0 * g.root_radius(),
+                "mate_pitch_diameter_mm": 2.0 * g.mate().pitch_radius(),
+                "mate_tip_diameter_mm": 2.0 * g.mate().tip_radius(),
+                "centre_distance_mm": mate_centre[0],
+                "ratio": f64::from(g.teeth) / f64::from(g.mate_teeth),
+                "profile_points": gear_pts.len(),
+                "mating_note": "cycloidal teeth are drawn for one mate: they run correctly only with that tooth count and exactly at centre_distance_mm (the mate is placed there on +x)",
+            }))
+        }
+        Kind::CycloidalDrive => {
+            let d = CycloidalDrive {
+                pins: int(params, "pins", 12)?,
+                pin_circle: num(params, "pin_circle_diameter", 60.0)? / 2.0,
+                pin_radius: num(params, "pin_diameter", 6.0)? / 2.0,
+                eccentricity: num(params, "eccentricity", 1.5)?,
+                lobe_points: int(params, "lobe_points", 60)?,
+            };
+            let thickness = length(params, "thickness", 8.0)?;
+            let wall = length(params, "housing_wall", 5.0)?;
+            let disc = d.disc().map_err(profile_err)?;
+            let bore = d.housing_bore().map_err(profile_err)?;
+            let e = d.eccentricity;
+            // The disc's smallest radius about its own centre bounds what can be cut from it.
+            let inner = disc.iter().map(|p| p[0].hypot(p[1])).fold(f64::MAX, f64::min);
+            let disc_bore = num(params, "disc_bore", 0.0)?;
+            if !(disc_bore >= 0.0 && disc_bore < 2.0 * inner - 4.0) {
+                return Err(Failure::Input("disc_bore", format!("must be 0 (none) or less than {:.3} mm", 2.0 * inner - 4.0)));
+            }
+            let holes = int(params, "output_holes", 0)?;
+            let out_pin = num(params, "output_pin_diameter", 5.0)?;
+            let out_circle = num(params, "output_circle_diameter", (disc_bore / 2.0 + inner) / 1.0)? / 2.0;
+            let hole_d = out_pin + 2.0 * e;
+            if holes > 0 {
+                if holes > 24 {
+                    return Err(Failure::Input("output_holes", "must be 0..=24".into()));
+                }
+                if !(out_pin > 0.0) {
+                    return Err(Failure::Input("output_pin_diameter", "must be more than 0".into()));
+                }
+                let fits = out_circle - hole_d / 2.0 > disc_bore / 2.0 + 1.0
+                    && out_circle + hole_d / 2.0 < inner - 1.0
+                    && 2.0 * out_circle * (PI / f64::from(holes)).sin() > hole_d + 1.0;
+                if !fits {
+                    return Err(Failure::Input(
+                        "output_holes",
+                        format!("{holes} holes of {hole_d:.3} mm (output pin + 2 × eccentricity) do not fit on a {:.3} mm circle in this disc", 2.0 * out_circle),
+                    ));
+                }
+            }
+            let tag = format!("{} pins", d.pins);
+            let disc_name = format!("Cycloid disc {tag}");
+            let housing_name = format!("Pin housing {tag}");
+            host.progress(0.1, "disc");
+            let disc_pts: Vec<[f64; 2]> = disc.iter().map(|p| [p[0] + e, p[1]]).collect();
+            host.run("sketch.create", json!({"plane": c.plane, "name": disc_name}))?;
+            let pts: Vec<Value> = disc_pts.iter().map(|p| json!([round(p[0]), round(p[1])])).collect();
+            host.run("sketch.line", json!({"points": pts, "closed": true}))?;
+            if disc_bore > 0.0 {
+                host.run("sketch.circle.center", json!({"center": [round(e), 0.0], "diameter": disc_bore}))?;
+            }
+            // Output holes on a circle about the disc's own centre.
+            for k in 0..holes {
+                let a = 2.0 * PI * f64::from(k) / f64::from(holes);
+                host.run("sketch.circle.center", json!({"center": [round(e + out_circle * a.cos()), round(out_circle * a.sin())], "diameter": round(hole_d)}))?;
+            }
+            host.run("sketch.finish", json!({}))?;
+            if host.cancelled() {
+                return Err(Failure::Cancelled);
+            }
+            host.run("solid.extrude", json!({"sketch": disc_name, "distance": thickness, "operation": "new", "body_name": disc_name}))?;
+            host.progress(0.6, "housing");
+            sketch_profile(host, c.plane, 0.0, &housing_name, &bore, 2.0 * (d.pin_circle + wall))?;
+            host.run("solid.extrude", json!({"sketch": housing_name, "distance": thickness, "operation": "new", "body_name": housing_name}))?;
+            host.progress(1.0, "done");
+            let output = if holes > 0 {
+                json!({"holes": holes, "hole_diameter_mm": hole_d, "pin_diameter_mm": out_pin, "circle_diameter_mm": 2.0 * out_circle,
+                       "note": "output pins sit on a carrier centred on the drive's axis, on this circle; each orbits inside its hole"})
+            } else {
+                Value::Null
+            };
+            Ok(json!({
+                "bodies": [disc_name, housing_name],
+                "pins": d.pins,
+                "lobes": d.pins - 1,
+                "ratio": d.ratio(),
+                "ratio_note": "one input (eccentric) turn moves the disc back by one lobe: ratio : 1, disc turning opposite to the input",
+                "eccentricity_mm": e,
+                "disc_centre_mm": [e, 0.0],
+                "disc_min_radius_mm": inner,
+                "pin_circle_diameter_mm": 2.0 * d.pin_circle,
+                "housing_outer_diameter_mm": 2.0 * (d.pin_circle + wall),
+                "output": output,
+                "profile_points": disc_pts.len(),
+                "assembly_note": "the disc is placed as it sits with the eccentric pointing along +x; the input shaft is on the housing's axis",
+            }))
+        }
         Kind::Worm => {
             let w = worm(params, &c)?;
             let right = hand(params)?;
@@ -1027,6 +1167,40 @@ mod tests {
 
         let mut h = Fake::default();
         assert!(build(&mut h, Kind::Planetary, &json!({"planets": 7})).is_err());
+        assert!(h.0.is_empty());
+    }
+
+    #[test]
+    fn cycloidal_builds_a_placed_pair() {
+        let mut h = Fake::default();
+        let out = build(&mut h, Kind::Cycloidal, &json!({"teeth": 60, "mate_teeth": 10, "module": 1, "mate_bore": 2})).unwrap();
+        assert_eq!(out["bodies"].as_array().unwrap().len(), 2);
+        assert_eq!(out["centre_distance_mm"], json!(35.0));
+        let mate_bore = h.0.iter().find(|(c, _)| c == "sketch.circle.center").map(|(_, a)| a).unwrap();
+        assert_eq!(mate_bore["center"], json!([35.0, 0.0]));
+        let mut h = Fake::default();
+        let out = build(&mut h, Kind::Cycloidal, &json!({"build": "gear"})).unwrap();
+        assert_eq!(out["bodies"].as_array().unwrap().len(), 1);
+        // Equal gears get distinct body names.
+        let mut h = Fake::default();
+        let out = build(&mut h, Kind::Cycloidal, &json!({"teeth": 20, "mate_teeth": 20})).unwrap();
+        assert_ne!(out["bodies"][0], out["bodies"][1]);
+    }
+
+    #[test]
+    fn cycloidal_drive_builds_disc_with_holes_and_housing() {
+        let mut h = Fake::default();
+        let out = build(&mut h, Kind::CycloidalDrive, &json!({"disc_bore": 10, "output_holes": 6, "output_pin_diameter": 4, "output_circle_diameter": 34})).unwrap();
+        assert_eq!(out["ratio"], json!(11.0));
+        let holes: Vec<&Value> = h.0.iter().filter(|(c, a)| c == "sketch.circle.center" && a["diameter"] == json!(7.0)).map(|(_, a)| a).collect();
+        assert_eq!(holes.len(), 6);
+        assert_eq!(holes[0]["center"], json!([18.5, 0.0]), "on the disc's centre, which is offset by e");
+        let extrudes = h.0.iter().filter(|(c, _)| c == "solid.extrude").count();
+        assert_eq!(extrudes, 2);
+        // Holes that cannot fit are refused before anything is built.
+        let mut h = Fake::default();
+        assert!(build(&mut h, Kind::CycloidalDrive, &json!({"output_holes": 20, "output_circle_diameter": 34})).is_err());
+        assert!(build(&mut h, Kind::CycloidalDrive, &json!({"eccentricity": 10})).is_err());
         assert!(h.0.is_empty());
     }
 }

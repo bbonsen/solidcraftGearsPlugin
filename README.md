@@ -1,6 +1,6 @@
 # Gears: a SolidCraft plugin
 
-Makes involute gears in SolidCraft. It adds ten entries to the Model ribbon. You fill in a
+Makes gears in SolidCraft. It adds twelve entries to the Model ribbon. You fill in a
 form, and the plugin computes the tooth profile, then builds it with ordinary SolidCraft
 commands:
 
@@ -15,6 +15,8 @@ commands:
 | `internal` | A ring with teeth on the inside: an outer circle and the toothed inner outline, extruded |
 | `planetary` | A sun, its planets and a ring, each extruded as its own body, all placed in mesh |
 | `rack` | A straight rack, extruded, plus (optionally) a spur pinion extruded in mesh with it |
+| `cycloidal` | A gear with cycloidal (clock-style) teeth, and optionally its mate, extruded in mesh |
+| `cycloidal-drive` | A cycloidal reducer's lobed disc and its pin housing, each extruded as its own body |
 | `hypoid` | One member of a hypoid pair: the heel profile swept towards the apex while it shrinks and twists (an approximation, see below) |
 
 The result is ordinary editable sketches, extrudes and sweeps, so you can modify it later. The
@@ -25,10 +27,10 @@ whole run is a single undo step. The plugin needs no file, network or settings a
 ## Install
 
 In SolidCraft (desktop), open **Preferences > Plugins > Install plugin…** and pick
-`gears-0.7.0.zip`. It asks for no permissions. You can also install it from a script:
+`gears-0.8.0.zip`. It asks for no permissions. You can also install it from a script:
 
 ```json
-[{"command":"plugin.install","params":{"path":"gears-0.7.0.zip"}}]
+[{"command":"plugin.install","params":{"path":"gears-0.8.0.zip"}}]
 ```
 
 To upgrade an earlier version by script, add `"replace": true`. In Preferences, remove the old version first if installing over it is refused.
@@ -178,6 +180,62 @@ which. With the ring held, the sun drives the carrier at 1 + ring/sun teeth : 1 
 default set). The reply also gives the carrier radius and each planet's centre for building a
 carrier.
 
+## Cycloidal gears (entries `cycloidal` and `cycloidal-drive`)
+
+![Cycloidal teeth in mesh, and a cycloidal drive](preview-cycloidal.png)
+
+### Cycloidal teeth (`cycloidal`)
+
+| Field | Default | Meaning |
+|---|---|---|
+| `teeth` | 60 | This gear's teeth |
+| `mate_teeth` | 10 | The mating gear's teeth: cycloidal teeth are drawn for one mate |
+| `module` | 1 | Module of both gears |
+| `build` | both | `both` builds the mate too, placed in mesh on +x; `gear` builds this gear alone |
+| `thickness` | 6 | Face width, mm |
+| `bore`, `mate_bore` | 0 | Bore diameters, mm |
+
+`backlash`, `plane` and `flank_points` (default 12) work as for `spur`.
+
+This is the classic clockmaking layout. Above the pitch circle, each flank is an epicycloid
+traced by a circle half the size of the mate's pitch circle. Below it, the flank is a straight
+radial line, which is the hypocycloid of a circle half this gear's own pitch size. The addendum is
+one module, or less where a small pinion's flanks would meet first. Unlike involute gears,
+cycloidal gears run correctly only with the mate they were drawn for and exactly at their centre
+distance, (teeth + mate teeth) × module / 2; the reply gives it.
+
+### Cycloidal drives (`cycloidal-drive`)
+
+| Field | Default | Meaning |
+|---|---|---|
+| `pins` | 12 | Pins in the housing, 4–60. The disc has one lobe fewer; ratio = pins − 1 |
+| `pin_circle_diameter` | 60 | Diameter of the circle through the pin centres, mm |
+| `pin_diameter` | 6 | mm |
+| `eccentricity` | 1.5 | Offset of the disc on the input eccentric, mm; less than pin circle radius / pins |
+| `thickness` | 8 | Disc and housing thickness, mm |
+| `housing_wall` | 5 | Housing wall outside the pin circle, mm |
+| `disc_bore` | 0 | Bore for the eccentric's bearing, mm |
+| `output_holes` | 0 | Holes for output pins, on a circle about the disc's centre |
+| `output_pin_diameter` | 5 | The holes are this + 2 × eccentricity, so the pins can orbit inside them |
+| `output_circle_diameter` | between bore and lobes | Circle the output holes sit on, mm |
+| `lobe_points` | 60 | Points per lobe |
+| `plane` | XY | |
+
+It builds two bodies:
+
+- **Disc:** the exact cycloid offset by the pin radius, from the standard parametric equation for
+  the disc's outline. It's placed as it sits with the eccentric pointing along +x, so its centre
+  is at (eccentricity, 0) and it touches every pin.
+- **Housing:** a ring whose bore is the pin circle with each pin's inner half standing in from
+  it. That makes the pins part of the housing, which suits 3D printing; for steel pins or
+  rollers, drill the pin holes yourself.
+
+One turn of the input eccentric moves the disc back by one lobe, so the output turns at
+1 / (pins − 1) of the input speed, in the opposite direction. With the default 60 points per
+lobe, the outline's straight segments sit within about 0.008 mm of the true curve.
+The entry refuses an eccentricity or pin size that would make the disc's outline fold over
+itself, and output holes that do not fit.
+
 ## Rack and pinion (entry `rack`)
 
 | Field | Default | Meaning |
@@ -257,7 +315,7 @@ would differ near the root.
 ```bash
 rustup target add wasm32-unknown-unknown
 cargo install wasm-tools
-./build.sh          # tests, builds the component, writes gears-0.7.0.zip
+./build.sh          # tests, builds the component, writes gears-0.8.0.zip
 ```
 
 `host-check/` runs the packaged component inside SolidCraft's real runtime crate
