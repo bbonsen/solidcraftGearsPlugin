@@ -1,6 +1,7 @@
 # Gears: a SolidCraft plugin
 
-Makes gears in SolidCraft. It adds twelve entries to the Model ribbon. You fill in a
+Makes gears in SolidCraft. It adds twelve commands to the Plugins group on the Model tab and to the
+Plugins menu. You fill in a
 form, and the plugin computes the tooth profile, then builds it with ordinary SolidCraft
 commands:
 
@@ -32,13 +33,43 @@ with its default inputs) crashes the app without an error message; the same pack
 installs the plugin and shows its forms; it only fails on Run.
 
 In SolidCraft (desktop), open **Preferences > Plugins > Install plugin…** and pick
-`gears-0.9.0.zip`. It asks for no permissions. You can also install it from a script:
+`gears-0.10.0.zip`. It asks for no permissions. You can also install it from a script:
 
 ```json
-[{"command":"plugin.install","params":{"path":"gears-0.9.0.zip"}}]
+[{"command":"plugin.install","params":{"path":"gears-0.10.0.zip"}}]
 ```
 
 To upgrade an earlier version by script, add `"replace": true`. In Preferences, remove the old version first if installing over it is refused.
+
+## Command names
+
+Each entry declares two names in its manifest `slots`:
+
+- a `menu` slot whose name is the command's title: in the Plugins menu, on its dialog and in the
+  ribbon button's hover text ("Gears: Spur gear");
+- a `ribbon` slot whose name is the short label under its ribbon button ("Spur").
+
+That is how SolidCraft 0.43.0 reads slot names. (Its `docs/plugins.md` still describes a
+`ribbon` slot name as the ribbon tab to place the button on; the code puts every plugin button
+in the Model tab's Plugins group and uses the name as the label.)
+
+| Entry | Title | Ribbon label |
+|---|---|---|
+| `spur` | Spur gear | Spur |
+| `helical` | Helical gear | Helical |
+| `herringbone` | Herringbone gear | Herringbone |
+| `internal` | Internal gear | Internal |
+| `planetary` | Planetary gear set | Planetary |
+| `rack` | Rack and pinion | Rack |
+| `bevel` | Bevel gear | Bevel |
+| `hypoid` | Hypoid gear | Hypoid |
+| `worm` | Worm | Worm |
+| `worm-wheel` | Worm wheel | Worm wheel |
+| `cycloidal` | Cycloidal gear | Cycloidal |
+| `cycloidal-drive` | Cycloidal drive | Cyclo drive |
+
+SolidCraft does not take plugin icons yet: every button shows its generic plugin icon.
+`icons/` holds an icon for each command, ready for when it does.
 
 ## Inputs (entry `spur`)
 
@@ -352,7 +383,7 @@ would differ near the root.
 ```bash
 rustup target add wasm32-unknown-unknown
 cargo install wasm-tools
-./build.sh          # tests, builds the component, writes gears-0.9.0.zip
+./build.sh          # tests, builds the component, writes gears-0.10.0.zip
 ```
 
 `host-check/` runs the packaged component inside SolidCraft's real runtime crate
