@@ -9,7 +9,7 @@ struct Recorder { calls: Vec<(String, Value)>, log: Vec<String>, committed: bool
 
 impl PluginHost for Recorder {
     fn command_catalog(&self) -> Vec<CommandSchema> {
-        ["sketch.create", "sketch.line", "sketch.circle.center", "sketch.finish", "solid.extrude"]
+        ["sketch.create", "sketch.line", "sketch.circle.center", "sketch.finish", "solid.extrude", "solid.sweep"]
             .iter()
             .map(|n| CommandSchema { name: n.to_string(), input_schema: json!({"type":"object"}), output_schema: json!({}), effect: Effect::Edit, group: None })
             .collect()
@@ -29,14 +29,19 @@ fn main() {
     let manifest = craft_plugin::parse_manifest(&manifest_bytes, "gears").expect("manifest parses");
     let wasm = std::fs::read(dir.join("gears.wasm")).expect("component");
     let cases = [
-        ("defaults", json!({})),
-        ("150 teeth, bore", json!({"teeth": 150, "module": 1, "bore": 20, "flank_points": 12})),
-        ("bad: 3 teeth", json!({"teeth": 3})),
+        ("spur", "defaults", json!({})),
+        ("spur", "150 teeth, bore", json!({"teeth": 150, "module": 1, "bore": 20, "flank_points": 12})),
+        ("spur", "bad: 3 teeth", json!({"teeth": 3})),
+        ("helical", "defaults", json!({})),
+        ("helical", "LH 30deg on YZ, bore", json!({"helix_angle": 30, "hand": "left", "plane": "YZ", "bore": 10, "thickness": 20})),
+        ("helical", "bad: helix 60", json!({"helix_angle": 60})),
     ];
-    for (label, params) in cases {
-        let (host, result) = craft_plugin_wasm::run(Recorder::default(), &manifest, &wasm, "spur", &params);
+    for (entry, label, params) in cases {
+        let label = format!("{entry} {label}");
+        let (host, result) = craft_plugin_wasm::run(Recorder::default(), &manifest, &wasm, entry, &params);
         let summary: Vec<String> = host.calls.iter().map(|(c, a)| match a.get("points") {
             Some(p) => format!("{c}({} pts)", p.as_array().map_or(0, |v| v.len())),
+            None if c == "solid.sweep" => format!("{c}(twist {})", a["twist"]),
             None => c.clone(),
         }).collect();
         println!("== {label}: committed={} rolled_back={}", host.committed, host.rolled_back);

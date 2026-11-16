@@ -2,14 +2,19 @@
 
 use std::f64::consts::PI;
 
-/// Inputs of a standard (unshifted, full-depth) involute spur gear. Lengths in mm.
+/// Inputs of a standard (unshifted, full-depth) involute spur or helical gear. Lengths in mm.
+/// For a helical gear, `module`, `pressure_angle` and `backlash` are normal-plane values (what
+/// a hob or catalogue gives); the profile is drawn in the transverse plane.
 #[derive(Clone, Debug)]
 pub struct SpurGear {
     pub teeth: u32,
+    /// Normal module.
     pub module: f64,
-    /// Pressure angle in degrees.
+    /// Normal pressure angle in degrees.
     pub pressure_angle: f64,
-    /// Circular backlash at the pitch circle, removed from tooth thickness (mm).
+    /// Helix angle in degrees; 0 for a spur gear.
+    pub helix_angle: f64,
+    /// Normal circular backlash at the pitch circle, removed from tooth thickness (mm).
     pub backlash: f64,
     /// Points along each flank (more = smoother, slower).
     pub flank_points: u32,
@@ -45,25 +50,47 @@ impl SpurGear {
         if !(self.backlash.is_finite() && self.backlash >= 0.0 && self.backlash < self.module) {
             return Err(("backlash", "must be at least 0 and smaller than the module".into()));
         }
+        if !(self.helix_angle.is_finite() && (0.0..=45.0).contains(&self.helix_angle)) {
+            return Err(("helix_angle", "must be 0..=45 degrees".into()));
+        }
         if !(2..=40).contains(&self.flank_points) {
             return Err(("flank_points", "must be 2..=40".into()));
         }
         Ok(())
     }
 
+    fn cos_helix(&self) -> f64 {
+        self.helix_angle.to_radians().cos()
+    }
+
+    /// Module in the transverse plane (equals `module` for a spur gear).
+    pub fn transverse_module(&self) -> f64 {
+        self.module / self.cos_helix()
+    }
+
+    /// Pressure angle in the transverse plane, radians.
+    pub fn transverse_pressure_angle(&self) -> f64 {
+        (self.pressure_angle.to_radians().tan() / self.cos_helix()).atan()
+    }
+
+    /// How far the profile turns over `face_width` mm of a helical gear, radians.
+    pub fn twist(&self, face_width: f64) -> f64 {
+        face_width * self.helix_angle.to_radians().tan() / self.circles().pitch
+    }
+
     pub fn circles(&self) -> Circles {
-        let pitch = self.module * f64::from(self.teeth) / 2.0;
+        let pitch = self.transverse_module() * f64::from(self.teeth) / 2.0;
         Circles {
             pitch,
-            base: pitch * self.pressure_angle.to_radians().cos(),
+            base: pitch * self.transverse_pressure_angle().cos(),
             tip: pitch + self.module,
             root: pitch - 1.25 * self.module,
         }
     }
 
-    /// Fewest teeth that avoid undercut for this pressure angle (2 / sin²α).
+    /// Fewest teeth that avoid undercut (2·cosβ / sin²αt; 2 / sin²α for a spur gear).
     pub fn min_teeth_without_undercut(&self) -> f64 {
-        2.0 / self.pressure_angle.to_radians().sin().powi(2)
+        2.0 * self.cos_helix() / self.transverse_pressure_angle().sin().powi(2)
     }
 
     /// Closed profile, counter-clockwise, gear centred on the origin with tooth 0 on +X.
@@ -72,10 +99,11 @@ impl SpurGear {
         self.validate()?;
         let c = self.circles();
         let z = f64::from(self.teeth);
-        let alpha = self.pressure_angle.to_radians();
+        let alpha = self.transverse_pressure_angle();
+        let backlash = self.backlash / self.cos_helix();
 
         // Half the tooth's angular thickness measured at the base circle.
-        let half_pitch = (PI * self.module / 2.0 - self.backlash) / (2.0 * c.pitch);
+        let half_pitch = (PI * self.transverse_module() / 2.0 - backlash) / (2.0 * c.pitch);
         let psi_base = half_pitch + inv(alpha);
         // Half angle of the tooth at radius r (r >= base).
         let psi = |r: f64| psi_base - inv((c.base / r).clamp(-1.0, 1.0).acos());
@@ -139,7 +167,7 @@ mod tests {
     use super::*;
 
     fn gear(teeth: u32) -> SpurGear {
-        SpurGear { teeth, module: 2.0, pressure_angle: 20.0, backlash: 0.0, flank_points: 8 }
+        SpurGear { teeth, module: 2.0, pressure_angle: 20.0, helix_angle: 0.0, backlash: 0.0, flank_points: 8 }
     }
 
     fn polar(p: [f64; 2]) -> (f64, f64) {
@@ -207,8 +235,36 @@ mod tests {
             SpurGear { pressure_angle: 90.0, ..gear(20) },
             SpurGear { backlash: 5.0, ..gear(20) },
             SpurGear { flank_points: 0, ..gear(20) },
+            SpurGear { helix_angle: 60.0, ..gear(20) },
+            SpurGear { helix_angle: f64::NAN, ..gear(20) },
         ] {
             assert!(g.profile().is_err(), "{g:?}");
         }
+    }
+
+    #[test]
+    fn helical_uses_transverse_module_and_normal_tooth_height() {
+        let g = SpurGear { helix_angle: 30.0, ..gear(20) };
+        let c = g.circles();
+        let mt = 2.0 / 30f64.to_radians().cos();
+        assert!((c.pitch - mt * 10.0).abs() < 1e-12);
+        assert!((c.tip - c.pitch - 2.0).abs() < 1e-12, "addendum is one normal module");
+        assert!((c.pitch - c.root - 2.5).abs() < 1e-12, "dedendum is 1.25 normal modules");
+        let at = (20f64.to_radians().tan() / 30f64.to_radians().cos()).atan();
+        assert!((c.base - c.pitch * at.cos()).abs() < 1e-12);
+        // Transverse tooth thickness at the pitch circle is half the transverse circular pitch.
+        let psi_base = PI / 40.0 + inv(at);
+        let arc = 2.0 * (psi_base - inv((c.base / c.pitch).acos())) * c.pitch;
+        assert!((arc - PI * mt / 2.0).abs() < 1e-9);
+        // Twist over the face width: b·tanβ / r.
+        assert!((g.twist(10.0) - 10.0 * 30f64.to_radians().tan() / c.pitch).abs() < 1e-12);
+        assert!(g.profile().is_ok());
+    }
+
+    #[test]
+    fn zero_helix_is_the_spur_gear() {
+        assert_eq!(gear(20).profile().unwrap(), SpurGear { helix_angle: 0.0, ..gear(20) }.profile().unwrap());
+        assert_eq!(gear(20).twist(10.0), 0.0);
+        assert!(SpurGear { helix_angle: 30.0, ..gear(10) }.min_teeth_without_undercut() < gear(10).min_teeth_without_undercut());
     }
 }

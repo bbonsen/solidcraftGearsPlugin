@@ -1,33 +1,212 @@
 {
   "id": "gears",
   "name": "Gears",
-  "version": "0.1.0",
-  "description": "Involute spur gears from module, tooth count and pressure angle, built as a native sketch and extrude.",
-  "capabilities": ["commands@0.1"],
+  "version": "0.2.0",
+  "description": "Involute spur and helical gears from module, tooth count, pressure angle and helix angle, built as native sketches, extrudes and sweeps.",
+  "capabilities": [
+    "commands@0.1"
+  ],
   "runtime": {
     "module": "gears.wasm",
-    "commands": ["sketch.create", "sketch.line", "sketch.circle.center", "sketch.finish", "solid.extrude"],
-    "limits": {"fuel": 200000000, "memory_mib": 32, "deadline_ms": 15000},
+    "commands": [
+      "sketch.circle.center",
+      "sketch.create",
+      "sketch.finish",
+      "sketch.line",
+      "solid.extrude",
+      "solid.sweep"
+    ],
+    "limits": {
+      "fuel": 200000000,
+      "memory_mib": 32,
+      "deadline_ms": 15000
+    },
     "entries": [
       {
         "name": "spur",
         "effect": "edit",
-        "slots": [{"kind": "ribbon", "name": "Model"}],
+        "slots": [
+          {
+            "kind": "ribbon",
+            "name": "Model"
+          }
+        ],
         "input_schema": {
           "type": "object",
           "properties": {
-            "teeth": {"type": "integer", "title": "Teeth", "minimum": 6, "maximum": 150, "default": 20},
-            "module": {"type": "number", "title": "Module (mm)", "minimum": 0.1, "maximum": 50, "default": 2},
-            "pressure_angle": {"type": "number", "title": "Pressure angle", "default": 20, "oneOf": [
-              {"const": 14.5, "title": "14.5°"},
-              {"const": 20, "title": "20° (standard)"},
-              {"const": 25, "title": "25°"}
-            ]},
-            "thickness": {"type": "number", "title": "Face width (mm)", "exclusiveMinimum": 0, "default": 10},
-            "bore": {"type": "number", "title": "Bore diameter (mm, 0 = none)", "minimum": 0, "default": 0},
-            "backlash": {"type": "number", "title": "Backlash (mm)", "minimum": 0, "default": 0},
-            "plane": {"type": "string", "title": "Plane", "enum": ["XY", "XZ", "YZ"], "default": "XY"},
-            "flank_points": {"type": "integer", "title": "Points per flank", "minimum": 2, "maximum": 40, "default": 8}
+            "teeth": {
+              "type": "integer",
+              "title": "Teeth",
+              "minimum": 6,
+              "maximum": 150,
+              "default": 20
+            },
+            "module": {
+              "type": "number",
+              "title": "Module (mm)",
+              "minimum": 0.1,
+              "maximum": 50,
+              "default": 2
+            },
+            "pressure_angle": {
+              "type": "number",
+              "title": "Pressure angle",
+              "default": 20,
+              "oneOf": [
+                {
+                  "const": 14.5,
+                  "title": "14.5°"
+                },
+                {
+                  "const": 20,
+                  "title": "20° (standard)"
+                },
+                {
+                  "const": 25,
+                  "title": "25°"
+                }
+              ]
+            },
+            "thickness": {
+              "type": "number",
+              "title": "Face width (mm)",
+              "exclusiveMinimum": 0,
+              "default": 10
+            },
+            "bore": {
+              "type": "number",
+              "title": "Bore diameter (mm, 0 = none)",
+              "minimum": 0,
+              "default": 0
+            },
+            "backlash": {
+              "type": "number",
+              "title": "Backlash (mm)",
+              "minimum": 0,
+              "default": 0
+            },
+            "plane": {
+              "type": "string",
+              "title": "Plane",
+              "enum": [
+                "XY",
+                "XZ",
+                "YZ"
+              ],
+              "default": "XY"
+            },
+            "flank_points": {
+              "type": "integer",
+              "title": "Points per flank",
+              "minimum": 2,
+              "maximum": 40,
+              "default": 8
+            }
+          }
+        }
+      },
+      {
+        "name": "helical",
+        "effect": "edit",
+        "slots": [
+          {
+            "kind": "ribbon",
+            "name": "Model"
+          }
+        ],
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "teeth": {
+              "type": "integer",
+              "title": "Teeth",
+              "minimum": 6,
+              "maximum": 150,
+              "default": 20
+            },
+            "module": {
+              "type": "number",
+              "title": "Normal module (mm)",
+              "minimum": 0.1,
+              "maximum": 50,
+              "default": 2
+            },
+            "pressure_angle": {
+              "type": "number",
+              "title": "Normal pressure angle",
+              "default": 20,
+              "oneOf": [
+                {
+                  "const": 14.5,
+                  "title": "14.5°"
+                },
+                {
+                  "const": 20,
+                  "title": "20° (standard)"
+                },
+                {
+                  "const": 25,
+                  "title": "25°"
+                }
+              ]
+            },
+            "helix_angle": {
+              "type": "number",
+              "title": "Helix angle (degrees)",
+              "exclusiveMinimum": 0,
+              "maximum": 45,
+              "default": 20
+            },
+            "hand": {
+              "type": "string",
+              "title": "Hand",
+              "default": "right",
+              "oneOf": [
+                {
+                  "const": "right",
+                  "title": "Right hand"
+                },
+                {
+                  "const": "left",
+                  "title": "Left hand"
+                }
+              ]
+            },
+            "thickness": {
+              "type": "number",
+              "title": "Face width (mm)",
+              "exclusiveMinimum": 0,
+              "default": 10
+            },
+            "bore": {
+              "type": "number",
+              "title": "Bore diameter (mm, 0 = none)",
+              "minimum": 0,
+              "default": 0
+            },
+            "backlash": {
+              "type": "number",
+              "title": "Normal backlash (mm)",
+              "minimum": 0,
+              "default": 0
+            },
+            "plane": {
+              "type": "string",
+              "title": "Plane",
+              "enum": [
+                "XY",
+                "XZ",
+                "YZ"
+              ],
+              "default": "XY"
+            },
+            "flank_points": {
+              "type": "integer",
+              "title": "Points per flank",
+              "minimum": 2,
+              "maximum": 40,
+              "default": 8
+            }
           }
         }
       }

@@ -10,7 +10,7 @@ fn path(g: &SpurGear, dx: f64, rot: f64) -> String {
     d + "Z"
 }
 fn main() {
-    let a = SpurGear { teeth: 20, module: 2.0, pressure_angle: 20.0, backlash: 0.0, flank_points: 8 };
+    let a = SpurGear { teeth: 20, module: 2.0, pressure_angle: 20.0, helix_angle: 0.0, backlash: 0.0, flank_points: 8 };
     let b = SpurGear { teeth: 12, ..a.clone() };
     let cd = (a.teeth + b.teeth) as f64 * a.module / 2.0;
     // Pinion rotated half a tooth so its tooth sits in the gear's gap.
