@@ -69,7 +69,18 @@ in the Model tab's Plugins group and uses the name as the label.)
 | `cycloidal-drive` | Cycloidal drive | Cyclo drive |
 
 SolidCraft does not take plugin icons yet: every button shows its generic plugin icon.
-`icons/` holds an icon for each command, ready for when it does.
+`icons/` holds an icon for each command, ready for when it does:
+
+![The twelve command icons at 96 px and at 24 px in light and dark themes](icons/contact-sheet.png)
+
+They are drawn from the plugin's own geometry code (`cargo run --example icons` rewrites them):
+the real tooth outlines for spur, internal, planetary, rack and pinion, worm wheel and both
+cycloidal entries, and side views from the same formulas for helical, herringbone, bevel,
+hypoid and worm (tooth lines turning at the helix angle, running to the cone apex, following the
+thread). Teeth are few so they stay legible at toolbar size, and mating parts are drawn slightly
+apart. They follow SolidCraft's icon conventions where a plugin can: `viewBox="0 0 64 64"` with
+no fixed size, artwork centred inside 5…59, 2.55-unit lines with round caps and joins, and only
+`currentColor`, so SolidCraft can tint them for its light and dark themes.
 
 ## Inputs (entry `spur`)
 
