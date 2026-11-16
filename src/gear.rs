@@ -478,6 +478,78 @@ impl Hypoid {
     }
 }
 
+/// An internal (ring) gear: teeth point inwards from a rim. Its tooth spaces are shaped like the
+/// teeth of an external gear, so the inner outline is built as one: "teeth" reaching out to the
+/// ring's root (pitch + 1.25 m) and spaces in to its tips (pitch − m).
+#[derive(Clone, Debug)]
+pub struct InternalGear {
+    pub teeth: u32,
+    pub module: f64,
+    pub pressure_angle: f64,
+    pub backlash: f64,
+    pub flank_points: u32,
+    /// Rim thickness outside the tooth roots, mm.
+    pub rim: f64,
+}
+
+impl InternalGear {
+    pub fn validate(&self) -> Result<(), (&'static str, String)> {
+        if !(12..=300).contains(&self.teeth) {
+            return Err(("teeth", "must be 12..=300".into()));
+        }
+        if !(self.module.is_finite() && self.module >= 0.1 && self.module <= 50.0) {
+            return Err(("module", "must be 0.1..=50 mm".into()));
+        }
+        if !(self.pressure_angle.is_finite() && (14.5..=30.0).contains(&self.pressure_angle)) {
+            return Err(("pressure_angle", "must be 14.5..=30 degrees".into()));
+        }
+        if !(self.backlash.is_finite() && self.backlash >= 0.0 && self.backlash < self.module / 2.0) {
+            return Err(("backlash", "must be at least 0 and smaller than half the module".into()));
+        }
+        if !(2..=40).contains(&self.flank_points) {
+            return Err(("flank_points", "must be 2..=40".into()));
+        }
+        if !(self.rim.is_finite() && self.rim > 0.0 && self.rim <= 10_000.0) {
+            return Err(("rim", "must be more than 0 and at most 10000 mm".into()));
+        }
+        Ok(())
+    }
+
+    /// Pitch, base, tip (inner, pitch − m) and root (outer, pitch + 1.25 m) radii.
+    pub fn circles(&self) -> Circles {
+        let pitch = self.module * f64::from(self.teeth) / 2.0;
+        Circles {
+            pitch,
+            base: pitch * self.pressure_angle.to_radians().cos(),
+            tip: pitch - self.module,
+            root: pitch + 1.25 * self.module,
+        }
+    }
+
+    pub fn outer_radius(&self) -> f64 {
+        self.circles().root + self.rim
+    }
+
+    /// The inner (toothed) outline, counter-clockwise, with a tooth centred at angle `rotation`.
+    pub fn profile(&self, rotation: f64) -> Result<Vec<[f64; 2]>, (&'static str, String)> {
+        self.validate()?;
+        let c = self.circles();
+        // The spaces, as teeth of an external gear: out to the ring's root, in to its tips.
+        let spaces = Circles { pitch: c.pitch, base: c.base, tip: c.root, root: c.tip };
+        let half_space = (PI * self.module / 2.0 + self.backlash) / (2.0 * c.pitch);
+        let flank = involute_flank(&spaces, self.pressure_angle.to_radians(), half_space, self.flank_points as usize)
+            .map_err(|_| ("teeth", "the tooth spaces close at the root; use a smaller pressure angle".to_string()))?;
+        assemble(self.teeth, &flank, rotation + PI / f64::from(self.teeth))
+            .map_err(|(_, r)| ("teeth", format!("the ring's teeth do not fit: {r}")))
+    }
+
+    /// Fewest teeth difference to a spur pinion that avoids tip interference, the usual rule of
+    /// thumb for full-depth teeth (12 at 20°, more at smaller pressure angles).
+    pub fn min_difference(&self) -> u32 {
+        if self.pressure_angle >= 20.0 { 12 } else { 15 }
+    }
+}
+
 /// A straight-toothed rack for a spur pinion. The pitch line lies on y = 0 and the teeth point
 /// up (+y), the first starting at x = 0; the bar's back is `back` mm below the root.
 #[derive(Clone, Debug)]
@@ -903,6 +975,82 @@ mod tests {
             Hypoid { face_width: 1000.0, ..hypoid() },
         ] {
             assert!(h.members().is_err(), "{h:?}");
+        }
+    }
+
+    fn ring(teeth: u32) -> InternalGear {
+        InternalGear { teeth, module: 2.0, pressure_angle: 20.0, backlash: 0.0, flank_points: 8, rim: 5.0 }
+    }
+
+    #[test]
+    fn internal_teeth_point_inwards_and_spaces_match_an_external_tooth() {
+        let g = ring(60);
+        let c = g.circles();
+        let pts = g.profile(0.0).unwrap();
+        simple_ccw(&pts, c.tip, c.root);
+        let rmin = pts.iter().map(|&p| polar(p).0).fold(f64::MAX, f64::min);
+        let rmax = pts.iter().map(|&p| polar(p).0).fold(0.0, f64::max);
+        assert!((rmin - 58.0).abs() < 1e-9 && (rmax - 62.5).abs() < 1e-9);
+        // A tooth is centred on +x: the innermost points straddle angle 0.
+        let tip_angles: Vec<f64> = pts.iter().filter(|&&p| (polar(p).0 - c.tip).abs() < 1e-9).map(|&p| p[1].atan2(p[0])).collect();
+        assert!(tip_angles.iter().any(|a| *a < 0.0 && *a > -0.1) && tip_angles.iter().any(|a| *a > 0.0 && *a < 0.1));
+        assert!((g.outer_radius() - 67.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_pinion_meshes_inside_the_ring_without_interference() {
+        fn inside(poly: &[[f64; 2]], p: [f64; 2]) -> bool {
+            let mut odd = false;
+            for i in 0..poly.len() {
+                let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
+                if (a[1] > p[1]) != (b[1] > p[1]) && p[0] < a[0] + (p[1] - a[1]) * (b[0] - a[0]) / (b[1] - a[1]) {
+                    odd = !odd;
+                }
+            }
+            odd
+        }
+        // Zero-backlash flanks touch at the pitch point; a little backlash keeps polygon rounding
+        // from reading as a clash.
+        let g = InternalGear { backlash: 0.05, ..ring(60) };
+        let ring_pts = g.profile(0.0).unwrap();
+        for z in [18, 24, 40] {
+            let pin = SpurGear { teeth: z, module: 2.0, pressure_angle: 20.0, helix_angle: 0.0, backlash: 0.05, flank_points: 12 };
+            // Pinion centred inside, touching the ring's pitch circle on +x, with a tooth pointing
+            // at the ring's space... the ring has a tooth on +x, so the pinion puts a gap there.
+            let cx = g.circles().pitch - pin.circles().pitch;
+            let rot = PI / f64::from(z);
+            let pp: Vec<[f64; 2]> = pin
+                .profile()
+                .unwrap()
+                .iter()
+                .map(|p| [p[0] * rot.cos() - p[1] * rot.sin() + cx, p[0] * rot.sin() + p[1] * rot.cos()])
+                .collect();
+            // Every pinion point is inside the ring's hole (not in the ring's material), and no
+            // ring point is inside the pinion.
+            for &p in &pp {
+                assert!(inside(&ring_pts, p), "z={z}: pinion point {p:?} in the ring");
+            }
+            for &p in &ring_pts {
+                assert!(!inside(&pp, p), "z={z}: ring point {p:?} in the pinion");
+            }
+            // In mesh: the pinion reaches past the ring's tip circle.
+            assert!(pp.iter().any(|p| polar(*p).0 > g.circles().tip + 0.5), "z={z}");
+            // And the check has teeth: turned half a tooth, tooth meets tooth.
+            let wrong: Vec<[f64; 2]> = pin.profile().unwrap().iter().map(|p| [p[0] + cx, p[1]]).collect();
+            assert!(wrong.iter().any(|&p| !inside(&ring_pts, p)), "z={z}: clash not detected");
+        }
+    }
+
+    #[test]
+    fn internal_refuses_hostile_input() {
+        for g in [
+            InternalGear { teeth: 5, ..ring(60) },
+            InternalGear { module: f64::NAN, ..ring(60) },
+            InternalGear { pressure_angle: 5.0, ..ring(60) },
+            InternalGear { rim: 0.0, ..ring(60) },
+            InternalGear { backlash: 3.0, ..ring(60) },
+        ] {
+            assert!(g.profile(0.0).is_err(), "{g:?}");
         }
     }
 }

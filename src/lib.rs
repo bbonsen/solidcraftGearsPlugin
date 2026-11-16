@@ -4,7 +4,7 @@
 
 pub mod gear;
 
-use gear::{BevelGear, Hypoid, Rack, SpurGear, Worm};
+use gear::{BevelGear, Hypoid, InternalGear, Rack, SpurGear, Worm};
 use serde_json::{json, Value};
 use std::f64::consts::PI;
 
@@ -51,6 +51,7 @@ pub enum Kind {
     WormWheel,
     Rack,
     Hypoid,
+    Internal,
 }
 
 impl Kind {
@@ -64,6 +65,7 @@ impl Kind {
             "worm-wheel" => Some(Kind::WormWheel),
             "rack" => Some(Kind::Rack),
             "hypoid" => Some(Kind::Hypoid),
+            "internal" => Some(Kind::Internal),
             _ => None,
         }
     }
@@ -497,6 +499,51 @@ pub fn build(host: &mut dyn Host, kind: Kind, params: &Value) -> Result<Value, F
                 "approximation": "spiral bevel members sized by first-order hypoid rules (offset angle, pinion spiral angle, enlarged pinion); pitch cones are those of a bevel pair and the flanks are not machine-generated, so expect to tune backlash and placement",
             }))
         }
+        Kind::Internal => {
+            let module = num(params, "module", 2.0)?;
+            let g = InternalGear {
+                teeth: int(params, "teeth", 60)?,
+                module,
+                pressure_angle: num(params, "pressure_angle", 20.0)?,
+                backlash: c.backlash,
+                flank_points: c.flank_points,
+                rim: num(params, "rim", 3.0 * module)?,
+            };
+            let thickness = length(params, "thickness", 10.0)?;
+            let pinion_teeth = int(params, "pinion_teeth", 0)?;
+            let pts = g.profile(0.0).map_err(profile_err)?;
+            let gc = g.circles();
+            let name = format!("Internal gear z{} m{}", g.teeth, g.module);
+            host.progress(0.1, "sketching ring");
+            // The outer circle and the toothed inner outline: the region between them is the ring.
+            sketch_profile(host, c.plane, 0.0, &name, &pts, 2.0 * g.outer_radius())?;
+            host.progress(0.6, "extruding");
+            host.run("solid.extrude", json!({"sketch": name, "distance": thickness, "operation": "new", "body_name": name}))?;
+            host.progress(1.0, "done");
+            let mut warnings = Vec::new();
+            if pinion_teeth > 0 && g.teeth < pinion_teeth + g.min_difference() {
+                warnings.push(format!(
+                    "a {pinion_teeth}-tooth pinion is within {} teeth of this ring: expect tip interference",
+                    g.min_difference()
+                ));
+            }
+            if gc.tip < gc.base {
+                warnings.push("the ring's tooth tips lie inside the base circle, so their last part is radial, not involute".to_string());
+            }
+            Ok(json!({
+                "body": name,
+                "teeth": g.teeth,
+                "module_mm": g.module,
+                "pressure_angle_deg": g.pressure_angle,
+                "pitch_diameter_mm": 2.0 * gc.pitch,
+                "inner_diameter_mm": 2.0 * gc.tip,
+                "root_diameter_mm": 2.0 * gc.root,
+                "outer_diameter_mm": 2.0 * g.outer_radius(),
+                "profile_points": pts.len(),
+                "mating_note": "a spur pinion with the same module and pressure angle meshes inside, its centre (ring teeth - pinion teeth) * module / 2 from the ring's centre",
+                "warnings": warnings,
+            }))
+        }
         Kind::Worm => {
             let w = worm(params, &c)?;
             let right = hand(params)?;
@@ -878,6 +925,19 @@ mod tests {
         let mut h = Fake::default();
         assert!(build(&mut h, Kind::Hypoid, &json!({"member": "both"})).is_err());
         assert!(build(&mut h, Kind::Hypoid, &json!({"offset": 50})).is_err());
+        assert!(h.0.is_empty());
+    }
+
+    #[test]
+    fn internal_is_a_ring_sketch_extruded() {
+        let mut h = Fake::default();
+        let out = build(&mut h, Kind::Internal, &json!({"teeth": 60, "pinion_teeth": 50})).unwrap();
+        assert_eq!(names(&h), ["sketch.create", "sketch.line", "sketch.circle.center", "sketch.finish", "solid.extrude"]);
+        assert_eq!(h.0[2].1["diameter"], json!(2.0 * (62.5 + 6.0)));
+        assert_eq!(out["inner_diameter_mm"], json!(116.0));
+        assert_eq!(out["warnings"].as_array().unwrap().len(), 1, "50 in 60 is too close");
+        let mut h = Fake::default();
+        assert!(build(&mut h, Kind::Internal, &json!({"teeth": 6})).is_err());
         assert!(h.0.is_empty());
     }
 }

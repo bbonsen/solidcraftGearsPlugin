@@ -1,6 +1,6 @@
 # Gears: a SolidCraft plugin
 
-Makes involute gears in SolidCraft. It adds eight entries to the Model ribbon. You fill in a
+Makes involute gears in SolidCraft. It adds nine entries to the Model ribbon. You fill in a
 form, and the plugin computes the tooth profile, then builds it with ordinary SolidCraft
 commands:
 
@@ -12,6 +12,7 @@ commands:
 | `bevel` | The heel profile, swept towards the cone apex while it shrinks; the bore is cut after |
 | `worm` | The worm's section square to its axis, swept with one turn per lead; long worms in joined sections |
 | `worm-wheel` | A helical gear that meshes with a `worm` |
+| `internal` | A ring with teeth on the inside: an outer circle and the toothed inner outline, extruded |
 | `rack` | A straight rack, extruded, plus (optionally) a spur pinion extruded in mesh with it |
 | `hypoid` | One member of a hypoid pair: the heel profile swept towards the apex while it shrinks and twists (an approximation, see below) |
 
@@ -23,10 +24,10 @@ whole run is a single undo step. The plugin needs no file, network or settings a
 ## Install
 
 In SolidCraft (desktop), open **Preferences > Plugins > Install plugin…** and pick
-`gears-0.5.0.zip`. It asks for no permissions. You can also install it from a script:
+`gears-0.6.0.zip`. It asks for no permissions. You can also install it from a script:
 
 ```json
-[{"command":"plugin.install","params":{"path":"gears-0.5.0.zip"}}]
+[{"command":"plugin.install","params":{"path":"gears-0.6.0.zip"}}]
 ```
 
 To upgrade an earlier version by script, add `"replace": true`. In Preferences, remove the old version first if installing over it is refused.
@@ -128,6 +129,27 @@ crosses the worm's at 90°, `centre_distance_mm` (returned) away. A real worm wh
 its rim curves to wrap around the worm. This one is not, so the teeth touch at points rather
 than along lines. That is fine for light loads and 3D printing.
 
+## Internal gears (entry `internal`)
+
+| Field | Default | Meaning |
+|---|---|---|
+| `teeth` | 60 | 12–300 |
+| `module` | 2 | |
+| `pressure_angle` | 20 | 14.5, 20 or 25 degrees |
+| `thickness` | 10 | Face width, mm |
+| `rim` | 3 × module | Solid rim outside the tooth roots, mm |
+| `pinion_teeth` | 0 | Optional: the pinion you plan to run inside, to warn about tip interference |
+
+`backlash`, `plane` and `flank_points` work as for `spur`.
+
+The ring's teeth point inwards: their tips are at pitch − module and their roots at
+pitch + 1.25 × module. A ring's tooth spaces have the shape of an external gear's teeth, so the
+inner outline is built as one, and a tooth is centred on +x. Any spur gear with the same module
+and pressure angle meshes inside, its centre (ring teeth − pinion teeth) × module / 2 from the
+ring's centre. Keep the ring at least 12 teeth larger than the pinion (15 below 20°), or the tips
+interfere. Below about 34 teeth at 20°, the ring's tips lie inside the base circle, so their
+innermost part is radial rather than involute; the reply warns.
+
 ## Rack and pinion (entry `rack`)
 
 | Field | Default | Meaning |
@@ -207,7 +229,7 @@ would differ near the root.
 ```bash
 rustup target add wasm32-unknown-unknown
 cargo install wasm-tools
-./build.sh          # tests, builds the component, writes gears-0.5.0.zip
+./build.sh          # tests, builds the component, writes gears-0.6.0.zip
 ```
 
 `host-check/` runs the packaged component inside SolidCraft's real runtime crate

@@ -44,6 +44,8 @@ fn main() {
         ("hypoid", "gear, bore 12", json!({"member": "gear", "bore": 12})),
         ("hypoid", "pinion", json!({"member": "pinion"})),
         ("hypoid", "bad: offset 40", json!({"offset": 40})),
+        ("internal", "60 teeth", json!({})),
+        ("internal", "300 teeth", json!({"teeth": 300, "module": 1})),
     ];
     for (entry, label, params) in cases {
         let label = format!("{entry} {label}");
