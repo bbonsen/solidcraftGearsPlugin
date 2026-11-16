@@ -26,6 +26,11 @@ whole run is a single undo step. The plugin needs no file, network or settings a
 
 ## Install
 
+**Requires SolidCraft 0.43.0 or later.** In SolidCraft 0.42.0, running an entry (even `spur`
+with its default inputs) crashes the app without an error message; the same package works in
+0.43.0. The plugin interface (`craft:plugin@0.1.0`) is the same in both versions, so 0.42.0 also
+installs the plugin and shows its forms; it only fails on Run.
+
 In SolidCraft (desktop), open **Preferences > Plugins > Install plugin…** and pick
 `gears-0.9.0.zip`. It asks for no permissions. You can also install it from a script:
 
