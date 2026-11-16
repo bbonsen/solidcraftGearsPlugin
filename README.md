@@ -32,8 +32,9 @@ with its default inputs) crashes the app without an error message; the same pack
 0.43.0. The plugin interface (`craft:plugin@0.1.0`) is the same in both versions, so 0.42.0 also
 installs the plugin and shows its forms; it only fails on Run.
 
-In SolidCraft (desktop), open **Preferences > Plugins > Install plugin…** and pick
-`gears-0.10.0.zip`. It asks for no permissions. You can also install it from a script:
+Download `gears-0.10.0.zip` from the
+[latest release](https://github.com/bbonsen/solidcraftGearsPlugin/releases/latest). In SolidCraft
+(desktop), open **Preferences > Plugins > Install plugin…** and pick it. It asks for no permissions. You can also install it from a script:
 
 ```json
 [{"command":"plugin.install","params":{"path":"gears-0.10.0.zip"}}]
@@ -424,9 +425,15 @@ MIT OR Apache-2.0).
 
 ## Status
 
-The plugin has been tested in SolidCraft's plugin runtime with a host that records each
-command call, not yet in the SolidCraft app. A crowned spur's loft through 7 sections of
+`spur` has been run in SolidCraft 0.43.0. Every entry has been run in SolidCraft's plugin
+runtime with a host that records each command call, but the others have not yet been tried in
+the SolidCraft app itself. A crowned spur's loft through 7 sections of
 hundreds of segments each is also untested in the app. Sweeping a profile with hundreds of segments,
 with a twist or a scale, is the heaviest step. If it is slow or fails, lower `flank_points`.
 The joins between worm sections and between herringbone halves meet face to face, which is the
 case most likely to trouble a CAD kernel; if one fails, send the error.
+
+## License
+
+[MIT](LICENSE). `wit/plugin.wit` is SolidCraft's plugin interface, copied unchanged and
+licensed by its authors under MIT OR Apache-2.0.
